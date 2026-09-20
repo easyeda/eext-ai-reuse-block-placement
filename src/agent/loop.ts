@@ -143,7 +143,7 @@ export interface PlaceCbbItem {
 
 /**
  * 确认卡令牌记录。status 之外必须绑定提案内容：confirm 以卡上载荷为权威，
- * 不信任客户端回传的 libraryUuid/cbbUuid——授权语义是「按这张���执行」，
+ * 不信任客户端回传的 libraryUuid/cbbUuid——授权语义是「按这张卡执行」，
  * 而非「持卡可对目录里任意模块执行一次」。
  */
 interface CardRecord {

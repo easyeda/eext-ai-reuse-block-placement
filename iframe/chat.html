@@ -190,13 +190,19 @@
     white-space:pre-wrap; word-break:break-all; background:var(--panel-2); border:1px solid var(--line); border-radius:8px;
     max-height:180px; overflow-y:auto;}
   .card:not(.open) .card-bd, .card:not(.open) .card-detail{display:none;}
-  /* 卡内逐项行（Claude/Cursor 式 item 行）：勾选框 + 主信息 + 右侧行内控件 */
-  .pick-item{display:flex; align-items:center; gap:9px; padding:8px 10px; border:1px solid var(--line);
-    border-radius:10px; margin-bottom:6px; background:var(--panel-2);}
+  /* 卡内模块清单：限高内滚（滚到边缘后原生滚动链带动外层会话滚动） */
+  .pick-list{max-height:340px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--line-3) transparent;}
+  .pick-list::-webkit-scrollbar{width:8px;}
+  .pick-list::-webkit-scrollbar-thumb{background:var(--line-3); border-radius:4px;}
+  /* 卡内逐项行（Claude/Cursor 式 item 行）：紧凑单行 = 勾选框 + 名称 + 来源 + 说明（超长省略，整行悬停看全文）+ 右侧控件 */
+  .pick-item{display:flex; align-items:center; gap:9px; padding:5px 10px; border:1px solid var(--line);
+    border-radius:10px; margin-bottom:4px; background:var(--panel-2);}
   .pick-item input[type=checkbox]{flex:none;}
   .pick-item .pi-main{flex:1; min-width:0;}
   .pick-item .pi-title{font-weight:600; font-size:12.5px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
-  .pick-item .pi-reason{color:var(--text-3); font-size:11px; display:block; margin-top:2px;}
+  .pick-item .pi-name{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .pick-item .pi-reason{color:var(--text-3); font-size:11px; font-weight:400; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex-shrink:2;}
   .pick-item .pi-ctrls{flex:none; display:flex; gap:6px; margin-left:auto; justify-content:flex-end; flex-wrap:wrap;}
   .pick-item select, .pick-item input[type=number]{
     padding:5px 9px; border:1px solid var(--line); border-radius:7px; font-size:12.5px;
@@ -721,7 +727,31 @@
     try { localStorage.setItem(THEME_KEY, curTheme); } catch (e) {}
   };
 
-  function scrollBottom() { msgList.scrollTop = msgList.scrollHeight; }
+  /* 用户气泡定位的缓动滚动：easeOutCubic，距离越远时长略增（封顶 600ms）；
+     系统开启「减少动态效果」时直接跳转。动画期间用户滚轮/触摸或新消息自动滚动会随时打断。 */
+  let bubbleAnimId = 0;
+  function animateMsgScrollTo(top) {
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      msgList.scrollTop = top; return;
+    }
+    const from = msgList.scrollTop;
+    const dist = top - from;
+    if (Math.abs(dist) < 2) { msgList.scrollTop = top; return; }
+    const dur = Math.min(600, 240 + Math.abs(dist) * 0.25);
+    const start = performance.now();
+    const id = ++bubbleAnimId;
+    const ease = t => 1 - Math.pow(1 - t, 3);
+    const step = now => {
+      if (id !== bubbleAnimId) return; /* 已被新动画 / 用户操作 / scrollBottom 打断 */
+      const p = Math.min(1, (now - start) / dur);
+      msgList.scrollTop = from + dist * ease(p);
+      if (p < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+  msgList.addEventListener('wheel', () => { bubbleAnimId++; }, {passive: true});
+  msgList.addEventListener('touchstart', () => { bubbleAnimId++; }, {passive: true});
+  function scrollBottom() { bubbleAnimId++; msgList.scrollTop = msgList.scrollHeight; }
   /* ── 工具行 / 整轮计时组的折叠：事件委托（挂 msgList，实时解析当前 DOM），
      避免逐元素 onclick 因任何 DOM 重建而悬空失效 ── */
   msgList.addEventListener('click', e => {
@@ -752,7 +782,7 @@
     if (!seg || !msgList.contains(seg)) return;
     const top = seg.offsetTop - msgList.offsetTop;
     const maxTop = msgList.scrollHeight - msgList.clientHeight;
-    msgList.scrollTop = Math.max(0, Math.min(top, maxTop));
+    animateMsgScrollTo(Math.max(0, Math.min(top, maxTop)));
   });
   function addUserMsg(text) {
     $('#page-chat').classList.remove('empty'); /* 首条消息后隐藏空会话首屏 */
@@ -918,7 +948,7 @@
     return b;
   }
   /* 整轮工作计时（从消息发出起算）：运行中「⟳ Working for Xs」（旋转+闪烁），
-     结束「Worked for Xs」；展开显示本轮各工具行，收起时不���示 */
+     结束「Worked for Xs」；展开显示本轮各工具行，收起时不显示 */
   function addWorkTimer() {
     const el = document.createElement('div'); el.className = 'tool work running open';
     el.innerHTML = `
@@ -1034,7 +1064,7 @@
   function invalidateCards(reason) {
     liveCards.forEach(c => {
       if (!c.classList.contains('done')) {
-        c.classList.add('dead');
+        c.classList.add('dead'); c.classList.remove('open');
         const ft = c.querySelector('.card-foot');
         if (ft) ft.insertAdjacentHTML('beforeend', `<span style="color:var(--red);font-size:11.5px;margin-left:auto">⚠ ${esc(reason)}，请重新发起</span>`);
       }
@@ -1064,14 +1094,24 @@
     return el;
   }
 
+  /* 清单卡公共：计数徽标（已选 M/N 实时刷新） */
+  function bindPickCount(el, checkCls) {
+    const hd = el.querySelector('.hd-status');
+    const updCount = () => {
+      const boxes = [...el.querySelectorAll(`.${checkCls}`)];
+      hd.textContent = `已选 ${boxes.filter(cb => cb.checked).length}/${boxes.length}`;
+    };
+    updCount();
+    el.addEventListener('change', e => { if (e.target.classList && e.target.classList.contains(checkCls)) updCount(); });
+  }
+
   function addPlaceCard(card) {
     const picks = card.picks || [];
     const items = picks.map((p, i) => `
-      <div class="pick-item">
+      <div class="pick-item" ${p.reason ? `title="${esc(p.reason)}"` : ''}>
         <input type="checkbox" class="pk-check" data-i="${i}" checked>
         <div class="pi-main">
-          <div class="pi-title">${esc(p.name)} <span class="pick-src">${esc(p.src)}</span></div>
-          ${p.reason ? `<span class="pi-reason">${esc(p.reason)}</span>` : ''}
+          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span>${p.reason ? `<span class="pi-reason">${esc(p.reason)}</span>` : ''}</div>
         </div>
         <div class="pi-ctrls">
           <select class="pk-mode" ${p.pageSupport ? '' : 'disabled title="本地库不支持复用模块图页（lib_Cbb.get 崩溃）"'}>
@@ -1092,12 +1132,14 @@
     notes.push('自动按对齐网格排布并避开已占用区域；每次放置会向工程库写入一个 CBB 副本。');
     const el = cardShell({
       title: '放置方案确认',
-      bodyHTML: items + (picks.length > 1 ? `<div class="hint">共 ${picks.length} 项，可逐项调整形式与位置。</div>` : ''),
+      bodyHTML: `<div class="pick-list">${items}</div>`
+        + (picks.length > 1 ? `<div class="hint">共 ${picks.length} 项，可逐项调整形式与位置。</div>` : ''),
       detailText: notes.join('\n'),
       footHTML: `<button class="btn primary act-place">放置所选</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
     });
+    if (picks.length > 1) bindPickCount(el, 'pk-check');
     el.querySelector('.act-cancel').onclick = () => {
-      el.classList.add('dead');
+      el.classList.add('dead'); el.classList.remove('open');
       liveCards.splice(liveCards.indexOf(el), 1);
       try { bridge.cancelCard(SESSION_ID, card.token); } catch (e) {}
       addNote('已取消放置');
@@ -1117,7 +1159,7 @@
         });
       });
       if (!items.length) { busy = false; addNote('未勾选任何模块'); return; }
-      el.classList.add('done'); liveCards.splice(liveCards.indexOf(el), 1);
+      el.classList.add('done'); el.classList.remove('open'); liveCards.splice(liveCards.indexOf(el), 1);
       const tb = addToolBubble('place_cbb', items.length + ' 项');
       try {
         const res = await bridge.confirmPlace(SESSION_ID, card.token, items);
@@ -1137,10 +1179,32 @@
     };
   }
 
+  /* ── 模块描述编辑卡：队列步进式 ──
+     相邻到达的多张编辑提案合并为一张卡，一次只展示一个模块（第 1/N 个），
+     「写回修改」或「跳过」后自动进入下一个（每个模块仍是独立 token，后端协议不变）；
+     全部处理完后整卡折叠并汇总结果。单个提案时外观与旧行为一致。 */
+  let editQueue = null;
   function addEditCard(card) {
-    const el = cardShell({
-      title: '模块描述编辑',
-      bodyHTML: `
+    const isFirst = !editQueue;
+    if (isFirst) {
+      const el = cardShell({
+        title: '模块描述编辑',
+        bodyHTML: '',
+        footHTML: `<button class="btn primary act-apply">写回修改</button><span class="spacer"></span>`
+          + `<button class="btn link act-skip-all" type="button" style="display:none">跳过其余</button>`
+          + `<button class="btn act-skip">取消</button>`,
+      });
+      editQueue = { el, cards: [], idx: 0, applied: 0, skipped: 0 };
+      el.querySelector('.act-apply').onclick = applyEditQueueItem;
+      el.querySelector('.act-skip').onclick = skipEditQueueItem;
+      el.querySelector('.act-skip-all').onclick = skipRestEditQueue;
+    }
+    editQueue.cards.push(card);
+    if (isFirst) renderEditQueue();
+    else updateEditQueueMeta();
+  }
+  function editQueueBodyHTML(card) {
+    return `
         <div class="pick-item" style="display:block">
           <div class="pi-title">${esc(card.origName || card.name)} <span class="pick-src">${esc(card.src)}</span></div>
           ${card.analyzed ? '<span class="pi-reason" style="color:var(--blue)">已按模块自带原理图自动分析生成建议，可直接修改。</span>' : ''}
@@ -1148,31 +1212,81 @@
           <input type="text" class="em-name" value="${esc(card.name)}" style="width:100%; padding:6px 9px; border:1px solid var(--line); border-radius:7px; font:12.5px/1.5 inherit; font-family:inherit; background:var(--panel); color:var(--text); outline:none;">
           <label style="display:block; font-size:11.5px; color:var(--text-3); margin:8px 0 3px;">更新模块描述</label>
           <textarea class="em-desc" style="width:100%; min-height:84px; resize:vertical; padding:6px 9px; border:1px solid var(--line); border-radius:7px; font:12.5px/1.5 inherit; font-family:inherit; background:var(--panel); color:var(--text); outline:none;">${esc(card.description || '')}</textarea>
-        </div>`,
-      footHTML: `<button class="btn primary act-apply">写回修改</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
-    });
-    el.querySelector('.act-cancel').onclick = () => {
-      el.classList.add('dead'); liveCards.splice(liveCards.indexOf(el), 1);
-      try { bridge.cancelCard(SESSION_ID, card.token); } catch (e) {}
-      addNote('已取消编辑');
+        </div>`;
+  }
+  function renderEditQueue() {
+    const q = editQueue; if (!q) return;
+    q.el.querySelector('.card-bd').innerHTML = editQueueBodyHTML(q.cards[q.idx]);
+    updateEditQueueMeta();
+  }
+  function updateEditQueueMeta() {
+    const q = editQueue; if (!q) return;
+    const remaining = q.cards.length - q.idx;
+    q.el.querySelector('.hd-status').textContent = q.cards.length > 1 ? `第 ${q.idx + 1}/${q.cards.length} 个` : '';
+    q.el.querySelector('.act-skip').textContent = q.cards.length > 1 ? '跳过' : '取消';
+    q.el.querySelector('.act-skip-all').style.display = remaining > 1 ? '' : 'none';
+  }
+  function setEditQueueBusy(b) {
+    const q = editQueue; if (!q) return;
+    ['act-apply', 'act-skip', 'act-skip-all'].forEach(cls => { const btn = q.el.querySelector('.' + cls); if (btn) btn.disabled = b; });
+  }
+  function advanceEditQueue() {
+    const q = editQueue; if (!q) return;
+    q.idx++;
+    if (q.idx >= q.cards.length) finishEditQueue();
+    else renderEditQueue();
+  }
+  function finishEditQueue() {
+    const q = editQueue; editQueue = null;
+    const el = q.el;
+    if (el.classList.contains('dead')) return; /* 已被会话失效标记接管，不再重复收尾 */
+    if (q.cards.length > 1) el.querySelector('.hd-status').textContent = `写回 ${q.applied} · 跳过 ${q.skipped}`;
+    el.classList.add('done'); el.classList.remove('open');
+    liveCards.splice(liveCards.indexOf(el), 1);
+    if (q.cards.length > 1) {
+      streamAi(q.applied > 0
+        ? `描述修改处理完成：写回 **${q.applied}** 项${q.skipped ? `，跳过 ${q.skipped} 项` : ''}。到官方库面板刷新后即可看到。`
+        : '已跳过全部编辑，未做任何修改。', 3);
+    } else if (q.applied > 0) {
+      streamAi('已写回修改。到官方库面板刷新后即可看到。', 3);
+    }
+  }
+  async function applyEditQueueItem() {
+    const q = editQueue; if (!q || busy || q.el.classList.contains('dead')) return;
+    busy = true; setEditQueueBusy(true);
+    const card = q.cards[q.idx];
+    const payload = {
+      libraryUuid: card.libraryUuid, cbbUuid: card.cbbUuid,
+      name: q.el.querySelector('.em-name').value, description: q.el.querySelector('.em-desc').value,
     };
-    el.querySelector('.act-apply').onclick = async () => {
-      if (busy) return; busy = true;
-      el.classList.add('done'); liveCards.splice(liveCards.indexOf(el), 1);
-      const payload = {
-        libraryUuid: card.libraryUuid, cbbUuid: card.cbbUuid,
-        name: el.querySelector('.em-name').value, description: el.querySelector('.em-desc').value,
-      };
-      const tb = addToolBubble('edit_module', payload.name);
-      try {
-        const res = await bridge.confirmEdit(SESSION_ID, card.token, payload);
-        res.ok ? tb.done(res) : tb.fail(res.error || '失败', res);
-        busy = false;
-        await streamAi(res.ok ? '已写回修改。到官方库面板刷新后即可看到。' : ('写回失败：' + (res.error || '')), 3);
-      } catch (e) {
-        tb.fail(e.message || String(e)); busy = false;
-      }
-    };
+    const tb = addToolBubble('edit_module', payload.name);
+    try {
+      const res = await bridge.confirmEdit(SESSION_ID, card.token, payload);
+      res.ok ? tb.done(res) : tb.fail(res.error || '失败', res);
+      busy = false; setEditQueueBusy(false);
+      if (!res.ok) return; /* 失败留在当前模块，可重试或跳过 */
+      q.applied++;
+      advanceEditQueue();
+    } catch (e) {
+      tb.fail(e.message || String(e));
+      busy = false; setEditQueueBusy(false); /* 失败留在当前模块 */
+    }
+  }
+  function skipEditQueueItem() {
+    const q = editQueue; if (!q || busy || q.el.classList.contains('dead')) return;
+    try { bridge.cancelCard(SESSION_ID, q.cards[q.idx].token); } catch (e) {}
+    q.skipped++;
+    if (q.cards.length === 1) addNote('已取消编辑');
+    advanceEditQueue();
+  }
+  function skipRestEditQueue() {
+    const q = editQueue; if (!q || busy || q.el.classList.contains('dead')) return;
+    for (let i = q.idx; i < q.cards.length; i++) {
+      try { bridge.cancelCard(SESSION_ID, q.cards[i].token); } catch (e) {}
+    }
+    q.skipped += q.cards.length - q.idx;
+    q.idx = q.cards.length;
+    finishEditQueue();
   }
 
   function addExportCard(card) {
@@ -1182,8 +1296,7 @@
       <div class="pick-item">
         <input type="checkbox" class="ep-check" data-i="${i}" checked>
         <div class="pi-main">
-          <div class="pi-title">${esc(p.name)} <span class="pick-src">${esc(p.src)}</span></div>
-          <span class="pi-reason">${p.hasFile ? '本地 · 含工程文件' : (p.storage === 'local' ? '本地 · 路径未解析' : '云端 · 仅清单')}</span>
+          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span><span class="pi-reason">${p.hasFile ? '本地 · 含工程文件' : (p.storage === 'local' ? '本地 · 路径未解析' : '云端 · 仅清单')}</span></div>
         </div>
       </div>`).join('');
     const statParts = [];
@@ -1193,19 +1306,21 @@
     if (stats.failed) statParts.push(`${stats.failed} 库拉取失败`);
     const el = cardShell({
       title: '工程包导出确认',
-      bodyHTML: items + `<div class="hint">未勾选的模块不会写入 zip（catalog.json 同步排除）。云端模块勾选仅表示保留清单条目，工程数据在服务器。不含 apiKey。</div>`,
+      bodyHTML: `<div class="pick-list">${items}</div>`
+        + `<div class="hint">未勾选的模块不会写入 zip（catalog.json 同步排除）。云端模块勾选仅表示保留清单条目，工程数据在服务器。不含 apiKey。</div>`,
       detailText: statParts.length ? `目录统计：${statParts.join(' · ')}${stats.elapsedMs ? ` · 耗时 ${(stats.elapsedMs / 1000).toFixed(1)}s` : ''}` : undefined,
       footHTML: `<button class="btn primary act-go">导出工程包 zip</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
     });
+    if (picks.length > 1) bindPickCount(el, 'ep-check');
     ensureSeg().appendChild(el); liveCards.push(el); scrollBottom();
     el.querySelector('.act-cancel').onclick = () => {
-      el.classList.add('dead'); liveCards.splice(liveCards.indexOf(el), 1);
+      el.classList.add('dead'); el.classList.remove('open'); liveCards.splice(liveCards.indexOf(el), 1);
       try { bridge.cancelCard(SESSION_ID, card.token); } catch (e) {}
       addNote('已取消导出');
     };
     el.querySelector('.act-go').onclick = async () => {
       if (busy) return; busy = true;
-      el.classList.add('done'); liveCards.splice(liveCards.indexOf(el), 1);
+      el.classList.add('done'); el.classList.remove('open'); liveCards.splice(liveCards.indexOf(el), 1);
       const tb = addToolBubble('export_catalog', (stats.modules || 0) + ' 模块');
       try {
         const uuids = [];

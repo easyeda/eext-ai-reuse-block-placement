@@ -225,7 +225,7 @@ async function fetchLibraryModules(uuid: string): Promise<Array<CatalogModule>> 
 				uuid: mUuid,
 				name: String(row.name ?? ''),
 				description: String(row.description ?? ''),
-				// storage 在 fetchCatalog 中按库类型���确标记；此处先给占位默认
+				// storage 在 fetchCatalog 中按库类型正确标记；此处先给占位默认
 				storage: 'cloud',
 				classification: Array.isArray(row.classification) ? row.classification.map(String) : undefined,
 				updateTimestamp: typeof row.updateTimestamp === 'number' ? row.updateTimestamp : undefined,
