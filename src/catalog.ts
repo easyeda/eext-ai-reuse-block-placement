@@ -15,7 +15,7 @@ export function pageSupportOf(libraryKind: string): boolean {
 }
 
 export const CATALOG_FORMAT_VERSION = '0.2';
-export const CATALOG_GENERATOR = 'jlc-cbb-copilot';
+export const CATALOG_GENERATOR = 'ai-reuse-block-placement';
 
 export type LibraryKind = 'personal' | 'team' | 'local';
 export type LibraryScope = Record<LibraryKind, boolean>;

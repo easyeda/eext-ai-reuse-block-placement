@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
   复用模块 AI 对话助手（chat.html）
-  · 双模：无桥时 mock（浏览器预览）；EDA iframe 内走 eda.jlc_cbb_copilot.chatTurn
+  · 双模：无桥时 mock（浏览器预览）；EDA iframe 内走 eda.ai_reuse_block_placement.chatTurn
   · 写画布 / 写库 / 导出必须经确认卡
 -->
 <html lang="zh-CN">
@@ -102,9 +102,12 @@
   /* 首段以 AI 内容开头时（欢迎语/状态提示）给顶部留一点呼吸，用户气泡开头则贴住 header */
   .seg:first-child .col.ai:first-child, .seg:first-child .sysnote:first-child{ padding-top:12px; }
   .bubble{width:100%; padding:9px 13px; border-radius:12px; word-break:break-word;}
-  /* 用户气泡可点击：滚动会话定位到该消息开头 */
+  /* 用户气泡可点击：收起/展开（展开态由 JS 渲染全文，收起态由 JS 只渲染首个逻辑行） */
   .bubble.user{background:var(--selected); color:var(--text); border:1px solid var(--line-3); cursor:pointer;}
   .bubble.user:hover{border-color:var(--blue-line);}
+  /* 用户气泡收起态：单行省略。首个逻辑行由 JS 截取，此处仅负责单行内超宽的截断显示
+     （nowrap+ellipsis，不依赖 -webkit-line-clamp，规避内核差异） */
+  .bubble.user.fold{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   .ai-body b{color:inherit; font-weight:700;}
   .caret{display:inline-block;width:7px;height:14px;background:var(--blue);
     vertical-align:-2px; margin-left:2px; animation:blink 1s steps(2) infinite;}
@@ -376,6 +379,26 @@
         </div>
       </div>
       <div class="sec">
+        <div class="sec-hd">Jev模型接入</div>
+        <div class="sec-bd">
+          <div class="frow"><label>API Key</label><div class="fctl">
+            <input type="password" id="jevKey" value="" placeholder="TypeSafe 官方 Key，仅存本地（可选）">
+            <button class="btn" id="jevToggleKey" type="button">显示</button>
+          </div></div>
+          <div class="frow"><label>baseUrl</label><div class="fctl">
+            <input type="text" id="jevBase" value="" placeholder="https://api.typesafe.ai/v1">
+          </div></div>
+          <div class="frow"><label>model</label><div class="fctl">
+            <input type="text" id="jevModel" value="" placeholder="jev-latest">
+          </div></div>
+          <div class="frow"><label></label><div class="fctl">
+            <button class="btn primary" id="jevSave" type="button">保存设置</button>
+            <button class="btn" id="jevTestConn" type="button">测试连接</button>
+          </div></div>
+          <div class="opresult" id="jevResult"></div>
+        </div>
+      </div>
+      <div class="sec">
         <div class="sec-hd">库范围</div>
         <div class="sec-bd">
           <div class="env" id="envLine" hidden></div>
@@ -414,7 +437,7 @@
       <div class="sec">
         <div class="sec-hd">关于</div>
         <div class="sec-bd" style="font-size:12px; color:var(--text-2);">
-          复用模块 AI 对话助手 · jlc-cbb-copilot v0.6.0<br>
+          复用模块 AI 对话助手 · ai-reuse-block-placement v0.8.0<br>
           自然语言找模块、确认后放置、改描述、导出目录。写操作必须经确认卡。
         </div>
       </div>
@@ -454,7 +477,7 @@
   function findRealBridge() {
     const srcs = edaSources();
     for (let i = 0; i < srcs.length; i++) {
-      const b = srcs[i] && srcs[i].jlc_cbb_copilot;
+      const b = srcs[i] && srcs[i].ai_reuse_block_placement;
       if (b && typeof b.chatTurn === 'function') return b;
     }
     return null;
@@ -685,7 +708,7 @@
     if (!realBridge) {
       el.classList.add('show', 'warn');
       text.textContent = '预览模式 · 模拟数据';
-      el.title = '未检测到插件桥接（eda.jlc_cbb_copilot）：当前为浏览器直接预览，模块与回复均为演示数据。在嘉立创EDA中打开面板后自动接入真桥。';
+      el.title = '未检测到插件桥接（eda.ai_reuse_block_placement）：当前为浏览器直接预览，模块与回复均为演示数据。在嘉立创EDA中打开面板后自动接入真桥。';
       return;
     }
     let s = null;
@@ -727,31 +750,7 @@
     try { localStorage.setItem(THEME_KEY, curTheme); } catch (e) {}
   };
 
-  /* 用户气泡定位的缓动滚动：easeOutCubic，距离越远时长略增（封顶 600ms）；
-     系统开启「减少动态效果」时直接跳转。动画期间用户滚轮/触摸或新消息自动滚动会随时打断。 */
-  let bubbleAnimId = 0;
-  function animateMsgScrollTo(top) {
-    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      msgList.scrollTop = top; return;
-    }
-    const from = msgList.scrollTop;
-    const dist = top - from;
-    if (Math.abs(dist) < 2) { msgList.scrollTop = top; return; }
-    const dur = Math.min(600, 240 + Math.abs(dist) * 0.25);
-    const start = performance.now();
-    const id = ++bubbleAnimId;
-    const ease = t => 1 - Math.pow(1 - t, 3);
-    const step = now => {
-      if (id !== bubbleAnimId) return; /* 已被新动画 / 用户操作 / scrollBottom 打断 */
-      const p = Math.min(1, (now - start) / dur);
-      msgList.scrollTop = from + dist * ease(p);
-      if (p < 1) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-  }
-  msgList.addEventListener('wheel', () => { bubbleAnimId++; }, {passive: true});
-  msgList.addEventListener('touchstart', () => { bubbleAnimId++; }, {passive: true});
-  function scrollBottom() { bubbleAnimId++; msgList.scrollTop = msgList.scrollHeight; }
+  function scrollBottom() { msgList.scrollTop = msgList.scrollHeight; }
   /* ── 工具行 / 整轮计时组的折叠：事件委托（挂 msgList，实时解析当前 DOM），
      避免逐元素 onclick 因任何 DOM 重建而悬空失效 ── */
   msgList.addEventListener('click', e => {
@@ -773,16 +772,26 @@
       if (detail && detail.textContent) tool.classList.toggle('open');
     }
   });
-  /* ── 点击用户气泡：滚动会话定位到该消息所在分段的开头 ──
-     每条用户消息开启一个 .seg 分段，气泡本身随滚动吸顶，故锚点即其所在 seg 的顶部。 */
+  /* ── 点击用户气泡：收起/展开该条消息（收起仅显第一个逻辑行，解决多行长文本占据空间）。
+     收起/展开由 JS 按原始文本重渲染（dataset.raw 存原文），不依赖 line-clamp 类内核特性；
+     单行内超出气泡宽度再由 CSS nowrap+ellipsis 截断。
+     含换行或超长（>120 字）的消息生成时默认收起，其余默认展开。 ── */
+  function renderUserBubble(b, folded) {
+    const raw = b.dataset.raw || '';
+    b.classList.toggle('fold', folded);
+    if (folded) {
+      const norm = raw.replace(/\r\n?/g, '\n');
+      const nl = norm.indexOf('\n');
+      const first = (nl >= 0 ? norm.slice(0, nl) : norm).trim();
+      b.textContent = first + ((nl >= 0 || norm.length > first.length) ? '…' : '');
+    } else {
+      b.textContent = raw;
+    }
+  }
   msgList.addEventListener('click', e => {
     const bubble = e.target.closest('.bubble.user');
     if (!bubble || !msgList.contains(bubble)) return;
-    const seg = bubble.closest('.seg');
-    if (!seg || !msgList.contains(seg)) return;
-    const top = seg.offsetTop - msgList.offsetTop;
-    const maxTop = msgList.scrollHeight - msgList.clientHeight;
-    animateMsgScrollTo(Math.max(0, Math.min(top, maxTop)));
+    renderUserBubble(bubble, !bubble.classList.contains('fold'));
   });
   function addUserMsg(text) {
     $('#page-chat').classList.remove('empty'); /* 首条消息后隐藏空会话首屏 */
@@ -794,7 +803,13 @@
     curSeg = null; /* 新用户消息开启新分段 */
     const seg = ensureSeg();
     const c = document.createElement('div'); c.className = 'col user';
-    c.innerHTML = `<div class="bubble user">${esc(text)}</div>`;
+    const plain = String(text || '');
+    const b = document.createElement('div');
+    b.className = 'bubble user';
+    b.title = '点击收起/展开';
+    b.dataset.raw = plain;
+    c.appendChild(b);
+    renderUserBubble(b, /\n/.test(plain.trim()) || plain.length > 120);
     seg.appendChild(c); scrollBottom();
   }
   function addNote(text) {
@@ -1571,6 +1586,44 @@
     k.type = k.type === 'password' ? 'text' : 'password';
     $('#toggleKey').textContent = k.type === 'password' ? '显示' : '隐藏';
   };
+  $('#jevToggleKey').onclick = () => {
+    const k = $('#jevKey');
+    k.type = k.type === 'password' ? 'text' : 'password';
+    $('#jevToggleKey').textContent = k.type === 'password' ? '显示' : '隐藏';
+  };
+  function readJevForm() {
+    return { apiKey: $('#jevKey').value, baseUrl: $('#jevBase').value, model: $('#jevModel').value };
+  }
+  $('#jevSave').onclick = () => {
+    const r = $('#jevResult');
+    try {
+      if (typeof bridge.saveJevSettings !== 'function') {
+        r.className = 'opresult err'; r.textContent = '❌ 桥接未包含 saveJevSettings，请更新扩展并重开面板。';
+        return;
+      }
+      bridge.saveJevSettings(readJevForm());
+      r.className = 'opresult ok'; r.textContent = '✅ Jev 设置已保存（双写）。';
+    } catch (e) {
+      r.className = 'opresult err'; r.textContent = '保存失败：' + e.message;
+    }
+  };
+  $('#jevTestConn').onclick = async () => {
+    const r = $('#jevResult'); r.className = '';
+    const btn = $('#jevTestConn'); btn.disabled = true; btn.textContent = '测试中…';
+    try {
+      if (typeof bridge.testJevConnection !== 'function') {
+        r.className = 'opresult err'; r.textContent = '❌ 桥接未包含 testJevConnection，请更新扩展并重开面板。';
+        return;
+      }
+      const res = await bridge.testJevConnection();
+      r.className = res.ok ? 'opresult ok' : 'opresult err';
+      r.textContent = res.ok ? `✅ 连接成功：${res.model} · ${res.latencyMs}ms` : `❌ ${res.error}`;
+    } catch (e) {
+      r.className = 'opresult err'; r.textContent = '❌ ' + e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = '测试连接';
+    }
+  };
   function loadSettingsIntoForm() {
     try {
       const s = bridge.getLlmSettings();
@@ -1579,6 +1632,14 @@
         $('#setBase').value = s.baseUrl || '';
         $('#setKey').value = s.apiKey || '';
         $('#setModel').value = s.model || '';
+      }
+    } catch (e) {}
+    try {
+      const js = typeof bridge.getJevSettings === 'function' ? bridge.getJevSettings() : null;
+      if (js) {
+        $('#jevKey').value = js.apiKey || '';
+        $('#jevBase').value = js.baseUrl || '';
+        $('#jevModel').value = js.model || '';
       }
     } catch (e) {}
     try {

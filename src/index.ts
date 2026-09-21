@@ -3,14 +3,15 @@
  */
 import type { AgentEvent, CatalogStatsView, ChatTurnResult, PlaceCbbItem } from './agent/loop';
 import type { ClientEnv } from './env';
-import type { LlmSettings, PlacementSettings } from './settings';
+import type { JevSettings, LlmSettings, PlacementSettings } from './settings';
 import * as extensionConfig from '../extension.json';
 import { abortSession } from './agent/http';
+import { testJevConnection } from './agent/jev';
 import { cancelCard, chatTurn, confirmEdit, confirmExport, confirmPlace, resetChatSession, testLlmConnection } from './agent/loop';
 import { detectClientEnv, runSelfCheck } from './env';
 import { edaGlobal } from './host';
 import { importProjectPackage } from './pkg';
-import { getLibraryScope, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getProjectDirs, saveLibraryScope, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveProjectDirs } from './settings';
+import { getJevSettings, getLibraryScope, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getProjectDirs, saveJevSettings, saveLibraryScope, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveProjectDirs } from './settings';
 
 export const VERSION = extensionConfig.version;
 
@@ -18,6 +19,9 @@ export interface CbbCopilotBridge {
 	version: string;
 	getLlmSettings: () => LlmSettings;
 	saveLlmSettings: (s: LlmSettings) => void;
+	/** Jev 语义推荐设置（独立 Key 与开关；与主 LLM 相互独立）。 */
+	getJevSettings: () => JevSettings;
+	saveJevSettings: (s: JevSettings) => void;
 	getLibraryScope: () => Record<string, boolean>;
 	saveLibraryScope: (scope: Record<string, boolean>) => void;
 	getLocalLibraryPath: () => string;
@@ -39,6 +43,8 @@ export interface CbbCopilotBridge {
 	resetChatSession: (sessionId: string) => void;
 	selfCheck: () => Promise<string>;
 	testConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }>;
+	/** Jev 链路连通性测试（最小 noul 评估）：校验 Jev baseUrl / Key / model。 */
+	testJevConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }>;
 	getClientEnv: () => Promise<ClientEnv>;
 }
 
@@ -53,6 +59,8 @@ function installBridge(): void {
 		version: VERSION,
 		getLlmSettings,
 		saveLlmSettings,
+		getJevSettings,
+		saveJevSettings,
 		getLibraryScope,
 		saveLibraryScope,
 		getLocalLibraryPath,
@@ -90,24 +98,25 @@ function installBridge(): void {
 		},
 		selfCheck: () => runSelfCheck(VERSION),
 		testConnection: () => testLlmConnection(),
+		testJevConnection: () => testJevConnection(getJevSettings()),
 		getClientEnv: () => detectClientEnv(),
 	};
-	edaRef.jlc_cbb_copilot = bridge;
+	edaRef.ai_reuse_block_placement = bridge;
 }
 
 export function activate(_status?: 'onStartupFinished', _arg?: string): void {
-	console.warn(`CBB Copilot v${VERSION} activated`);
+	console.warn(`ai-reuse-block-placement v${VERSION} activated`);
 	installBridge();
 }
 
 export function deactivate(): void {
-	console.warn('CBB Copilot deactivated');
+	console.warn('AI Reuse Block Placement deactivated');
 }
 
 export async function openCopilot(): Promise<void> {
 	installBridge();
 	if (typeof eda !== 'undefined' && eda.sys_IFrame) {
-		let title = 'CBB Copilot';
+		let title = 'AI Reuse Block Placement';
 		try {
 			const lang = await eda.sys_I18n?.getCurrentLanguage?.();
 			if (lang && String(lang).toLowerCase().startsWith('zh')) {
@@ -119,11 +128,11 @@ export async function openCopilot(): Promise<void> {
 			'/iframe/chat.html',
 			440,
 			720,
-			'jlc-cbb-copilot',
+			'ai-reuse-block-placement',
 			{ title, maximizeButton: true, minimizeButton: true },
 		);
 		if (!success) {
-			console.error('Failed to open CBB Copilot panel');
+			console.error('Failed to open AI Reuse Block Placement panel');
 		}
 	}
 }

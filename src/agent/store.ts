@@ -261,7 +261,7 @@ export function humanizeAge(ms: number): string {
 
 /**
  * system 注入用的目录摘要（几百 token 级）：统计 + 各库计数 + 新鲜度 + 使用指引。
- * 完整模块数据不进上下文——检索一律走 search_modules / get_module。
+ * 完整模块数据不进上下文——检索走 search_modules / recommend_modules 分工。
  */
 export function buildCatalogSummaryPayload(rec: CatalogStoreRecord): string {
 	const perLib = rec.catalog.libraries.map(l => ({
@@ -280,7 +280,7 @@ export function buildCatalogSummaryPayload(rec: CatalogStoreRecord): string {
 		stale: ageMs > STALE_HINT_MS || undefined,
 		staleHint: ageMs > STALE_HINT_MS ? '目录数据较旧，若用户关心最新模块可调用 refresh_catalog' : undefined,
 		libraries: perLib,
-		usage: '模块明细不在上下文中：找模块用 search_modules（关键词），看单个模块详情用 get_module(cbbUuid)，需要最新数据用 refresh_catalog。',
+		usage: '模块明细不在上下文中：精确关键词（型号/模块名）找模块用 search_modules；宽泛/口语化/功能描述式需求或要推荐排序用 recommend_modules（query 传用户原始需求整句）。改名称/描述前用 inspect_module，看单个模块详情用 get_module(cbbUuid)，需要最新数据用 refresh_catalog。',
 	});
 }
 

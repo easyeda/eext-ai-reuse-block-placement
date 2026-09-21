@@ -12,8 +12,9 @@ import { fetchCatalog } from '../catalog';
 import { activateSchematicPage, cacheGeometry, collectPageObstacles, DEFAULT_PAGE_WIDTH, estimateGeometry, getCurrentDocState, loadGeometry, modifyCbbModule, parsePlaceTarget, placeCbbModule, planAlignedPlacement, premeasureGeometry, readCbbSchematicSummary } from '../cbb';
 import { effectiveLibraryScope, runSelfCheck } from '../env';
 import { exportProjectPackage } from '../pkg';
-import { getLlmSettings, getPlacementSettings } from '../settings';
+import { getJevSettings, getLlmSettings, getPlacementSettings } from '../settings';
 import { classifyLlmError, registerAbort, releaseAbort, sendLlmRequest, STREAM_SENTINEL } from './http';
+import { recommendModules } from './jev';
 import { buildAgentRequest, buildPingRequest, parseAgentResponse, StreamAccumulator } from './llm';
 import { buildCatalogSummaryPayload, clearCatalogRecord, EMPTY_CATALOG_NOTE, flattenCatalog, humanizeAge, loadCatalogRecord, lookupModule, searchInCatalog, storeCatalog } from './store';
 import { AGENT_TOOL_NAMES, MAX_DESC_LEN } from './tools';
@@ -27,8 +28,10 @@ const MAX_HISTORY = 12;
 const COMPACT_KEEP_TURNS = 4;
 /** 注入轮数信号的阈值：超过该值时每轮提示建议调用 compact_history。 */
 const COMPACT_SUGGEST_TURNS = 8;
-/** propose_placement 单卡最大候选数（与 schema maxItems 一致；网格批量放置的上限）。 */
-const MAX_PLACEMENT_PICKS = 20;
+/** propose_placement / recommend 自动出卡的单卡最大候选数（与 recommend limit 上限对齐）。 */
+const MAX_PLACEMENT_PICKS = 50;
+/** propose_export 按需导出单卡上限：超出部分截断并留在卡外（全量导出走省略参数的兜底路径）。 */
+const MAX_EXPORT_PICKS = 100;
 
 /** Agent 事件流：chatTurn 执行过程中实时推给 UI 的所有事件。 */
 export type AgentEvent
@@ -340,6 +343,120 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			},
 		};
 	},
+	recommend_modules: async (s, args) => {
+		const query = String(args.query || '').trim();
+		const limit = Math.min(Math.max(typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 10, 1), 50);
+		const jev = getJevSettings();
+		// 未配置 Key：温和回落（不报错）——提示模型改用 search_modules 完成本次需求，并可顺带提醒补 Key。
+		if (!jev.apiKey.trim()) {
+			return {
+				event: { name: 'recommend_modules', argsSummary: query || '(空)', status: 'skip', detail: { reason: '未配置 Jev API Key（可选增强）' } },
+				result: {
+					ok: true,
+					available: false,
+					modules: [],
+					hint: 'Jev 语义推荐未配置 API Key（可选增强，不阻塞使用）。请改用 search_modules 关键词检索完成本次需求；可顺带提醒用户：到 设置 → Jev 语义推荐 补充 API Key 后即可启用语义推荐（非必需）。',
+				},
+			};
+		}
+		if (!query) {
+			return {
+				event: { name: 'recommend_modules', argsSummary: '(空需求)', status: 'err', error: 'query 为空' },
+				result: { ok: false, error: 'query 不能为空：请把用户原始需求整句传入（无需提取关键词）。' },
+			};
+		}
+		const rec = await loadCatalogRecord();
+		if (!rec)
+			return missingCatalogOutcome('recommend_modules');
+		try {
+			const r = await recommendModules(jev, rec, query, limit);
+			// Jev 模式下本工具接管检索/详情/排序全程：返回全量明细，LLM 无需再调 get_module。
+			const modules = r.hits.map(h => ({
+				cbbUuid: h.module.uuid,
+				name: h.module.name,
+				desc: h.module.description || '',
+				classification: h.module.classification || [],
+				libraryKind: h.module.libraryKind,
+				src: h.module.src,
+				pageSupport: h.module.pageSupport,
+				storage: h.module.storage,
+				jevScore: h.score,
+				jevConfidence: h.confidence,
+				jevCategory: h.category,
+			}));
+			const notFoundHint = r.hits.length ? undefined : '所需类别下没有模块或全部得分过低（注意：不能断言目录中没有该类模块——可能是类别筛选未覆盖，可用 search_modules 关键词复核）。也可请用户把开源广场模块复制到个人库后 refresh_catalog。';
+			// 意图为放置 → 工具内直接出卡（与 propose_placement 同构：令牌绑定提案 uuid 集合），
+			// LLM 不再经手 picks/mode/target——mode/target 由 Jev 意图判定给出，reason 由分数模板生成。
+			if (r.placement?.place && r.hits.length) {
+				const picks: Array<PlacePickView> = r.hits.slice(0, MAX_PLACEMENT_PICKS).map((h) => {
+					let mode: PlaceMode = r.placement!.pageMode ? 'page' : 'symbol';
+					if (mode === 'page' && !h.module.pageSupport)
+						mode = 'symbol';
+					return {
+						uuid: h.module.uuid,
+						libraryUuid: h.module.libraryUuid,
+						name: h.module.name,
+						src: h.module.src,
+						reason: `Jev 匹配 ${h.score}/10 · ${h.category}`,
+						pageSupport: h.module.pageSupport,
+						mode,
+						target: parsePlaceTarget(r.placement!.target),
+					};
+				});
+				const token = newToken();
+				s.cards.set(token, { type: 'place', status: 'open', allowedUuids: new Set(picks.map(p => p.uuid)) });
+				const card: PlaceCardView = { type: 'place', token, picks, filtered: [], notFoundHint: undefined };
+				return {
+					event: {
+						name: 'recommend_modules',
+						argsSummary: `“${query}”`,
+						status: 'ok',
+						detail: { neededCategories: r.neededCategories.map(c => c.label), categoryHits: r.categoryHits, scored: r.scored, cardPicks: picks.length, target: r.placement.target, elapsedMs: r.elapsedMs },
+					},
+					card,
+					result: {
+						ok: true,
+						cardShown: true,
+						token,
+						target: r.placement.target,
+						neededCategories: r.neededCategories,
+						categoryHits: r.categoryHits,
+						matched: r.hits.length,
+						modules,
+						hint: '放置确认卡已自动出示（跨类别轮转选取：各子系统槽位都有代表；用户在卡上勾选确认后才会改动画布）。直接用中文说明推荐结果即可，禁止再调用 propose_placement 重复出卡。',
+					},
+				};
+			}
+			return {
+				event: {
+					name: 'recommend_modules',
+					argsSummary: `“${query}”`,
+					status: 'ok',
+					detail: { neededCategories: r.neededCategories.map(c => c.label), categoryHits: r.categoryHits, scored: r.scored, placeIntent: r.placement?.prob, elapsedMs: r.elapsedMs },
+				},
+				result: {
+					ok: true,
+					cardShown: false,
+					neededCategories: r.neededCategories,
+					categoryHits: r.categoryHits,
+					placement: r.placement,
+					matched: r.hits.length,
+					modules,
+					notFoundHint,
+					hint: r.hits.length
+						? '放置意图未达自动出卡线：先用文字按类别分组给出方案（引用 jevScore），并询问用户是否放置。仅当用户明确要求放置时才调 propose_placement 出卡（picks 直接取 modules 的 cbbUuid/name，mode/target 参考 placement 字段）；用户未要求时不要出卡。'
+						: '没有合适模块：把 notFoundHint 转述给用户。',
+				},
+			};
+		}
+		catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return {
+				event: { name: 'recommend_modules', argsSummary: `“${query}”`, status: 'err', error: msg },
+				result: { ok: false, error: `Jev 推荐失败：${msg}。请改用 search_modules 关键词检索。` },
+			};
+		}
+	},
 	get_module: async (_s, args) => {
 		const rec = await loadCatalogRecord();
 		if (!rec)
@@ -386,24 +503,63 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			result: { ok: true, text },
 		};
 	},
-	propose_export: async (s) => {
+	propose_export: async (s, args) => {
 		const rec = await loadCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('propose_export');
-		const picks: Array<ExportPickView> = flattenCatalog(rec.catalog).map(m => ({
-			uuid: m.uuid,
-			name: m.name,
-			src: m.src,
-			storage: m.storage,
-			hasFile: m.storage === 'local' && m.filePathSource === 'indexed',
-		}));
+		// 按需导出（与放置 picks 同思路）：传入 cbbUuids 时卡上只列这些模块（逐个对目录校验，
+		// 无效的进 filtered 回显）；省略时兜底为全量目录（仅用户明确要导出全部时应省略）。
+		const requested = Array.isArray(args.cbbUuids)
+			? (args.cbbUuids as Array<unknown>).map(u => String(u || '').trim()).filter(Boolean).slice(0, MAX_EXPORT_PICKS)
+			: null;
+		const picks: Array<ExportPickView> = [];
+		const filtered: Array<string> = [];
+		if (requested) {
+			for (const uuid of requested) {
+				const hit = await lookupModule(uuid);
+				if (!hit) {
+					filtered.push(uuid);
+					continue;
+				}
+				picks.push({
+					uuid: hit.uuid,
+					name: hit.name,
+					src: hit.src,
+					storage: hit.storage,
+					hasFile: hit.storage === 'local' && hit.filePathSource === 'indexed',
+				});
+			}
+			if (!picks.length) {
+				return {
+					event: { name: 'propose_export', argsSummary: `${filtered.length} 个无效 uuid`, status: 'err', error: '提供的 cbbUuids 均不在目录中' },
+					result: { ok: false, error: '提供的 cbbUuids 均不在当前目录缓存中：请用 search_modules / recommend_modules 重新获取有效 uuid，或省略 cbbUuids 导出全部目录。' },
+				};
+			}
+		}
+		else {
+			picks.push(...flattenCatalog(rec.catalog).map(m => ({
+				uuid: m.uuid,
+				name: m.name,
+				src: m.src,
+				storage: m.storage,
+				hasFile: m.storage === 'local' && m.filePathSource === 'indexed',
+			})));
+		}
 		const token = newToken();
 		s.cards.set(token, { type: 'export', status: 'open', allowedUuids: new Set(picks.map(p => p.uuid)) });
 		const card: ExportCardView = { type: 'export', token, stats: rec.stats, picks };
 		return {
-			event: { name: 'propose_export', argsSummary: `${card.stats.modules} 模块`, status: 'ok' },
+			event: { name: 'propose_export', argsSummary: requested ? `按需 ${picks.length} 项${filtered.length ? `（${filtered.length} 个无效 uuid 已剔除）` : ''}` : `全量 ${card.stats.modules} 模块`, status: 'ok', detail: { filtered: filtered.length ? filtered : undefined } },
 			card,
-			result: { ok: true, token, stats: card.stats, hint: '已出示导出确认卡（默认全选），等待用户勾选并确认后才会写文件' },
+			result: {
+				ok: true,
+				token,
+				stats: card.stats,
+				filtered: filtered.length ? filtered : undefined,
+				hint: requested
+					? '已出示按需导出确认卡（只含指定模块，默认全选），等待用户确认后才会写文件；用户在卡上仍可增删勾选（全量清单不在此卡上）。'
+					: '已出示全量导出确认卡（目录全部模块，默认全选），等待用户勾选并确认后才会写文件。',
+			},
 		};
 	},
 	inspect_module: async (s, args) => {
@@ -493,11 +649,10 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				filtered.push(`${String(it.name || uuid || '(空)')}（不在目录中）`);
 				continue;
 			}
-			// 默认图页形式：模块符号可能尚未生成（空符号不可见且会重叠），仅 LLM 显式给 symbol 才用符号。
-			// pageSupport 兜底：不支持图页的库类型强制回符号（2026-09-16 起三类库均支持图页——
-			// 本地库 uuid 由 .eprj2 解析，不再依赖会崩溃的 lib_Cbb.get）。
-			let mode: PlaceMode = it.mode === 'symbol' ? 'symbol' : 'page';
-			if (!hit.pageSupport)
+			// 默认符号形式（更轻量、放置后即时可见）：仅 LLM 显式给 page 才用图页。
+			// pageSupport 兜底：用户点名图页但该库类型不支持时回符号。
+			let mode: PlaceMode = it.mode === 'page' ? 'page' : 'symbol';
+			if (mode === 'page' && !hit.pageSupport)
 				mode = 'symbol';
 			const target: PlaceTarget = parsePlaceTarget(it.target);
 			picks.push({
@@ -652,11 +807,19 @@ export async function chatTurn(
 			const userTurns = s.history.filter(h => h.role === 'user').length;
 			// 轮数信号：模型无法自数轮数，注入确定性计数；超过阈值时明确建议压缩（compact_history）。
 			const historyNote = `\n\n当前对话 ${userTurns} 轮${userTurns > COMPACT_SUGGEST_TURNS ? '，建议调用 compact_history 折叠早期对话（把此前对话的完整摘要写入 summary 参数）' : ''}。`;
+			const jev = getJevSettings();
+			const jevReady = jev.apiKey.trim() !== '';
 			const catalogNote = catalogRecord
-				? `\n\n目录缓存摘要（模块明细不在上下文中，检索用 search_modules）：\n${buildCatalogSummaryPayload(catalogRecord)}${historyNote}`
+				? `\n\n目录缓存摘要（模块明细不在上下文中，找模块按 search_modules / recommend_modules 分工检索）：\n${buildCatalogSummaryPayload(catalogRecord)}${historyNote}`
 				: `\n\n${EMPTY_CATALOG_NOTE}${historyNote}`;
+			// 上下文提示：两个检索工具并存分工（与两工具 description 的「分工」段成对维护）——
+			// 精确关键词走 search_modules（零成本），宽泛/功能描述式需求走 recommend_modules（语义+排序+自动出卡）。
+			// 未配置 Jev Key 时提示模型直接用关键词检索，并顺带提醒用户可补 Key（不阻塞、不强制）。
+			const jevHint = jevReady
+				? '\n\n找模块按分工二选一：模块名/型号/器件名等精确关键词用 search_modules；需求宽泛、口语化或按功能描述、以及用户要推荐排序时用 recommend_modules，query 直接传用户原始需求整句。recommend_modules 返回 cardShown=true 时放置卡已自动出示，禁止再调 propose_placement 重复出卡，直接写最终说明；cardShown=false 时按返回的 modules（含全量描述与 jevScore）直接回答，不要调 get_module 重复取详情，且不要主动出示放置卡——仅当用户明确要求放置时才调 propose_placement（picks 取自 modules，mode/target 参考 placement 字段），否则给文字方案并询问是否放置。'
+				: '\n\n当前未配置 Jev API Key（可选增强）：recommend_modules 暂不可用，找模块直接用 search_modules；可顺带提醒用户到 设置 → Jev模型接入 补充 API Key（非必需）。';
 			const settings = getLlmSettings();
-			const req = buildAgentRequest(settings, catalogNote, s.history);
+			const req = buildAgentRequest(settings, catalogNote + jevHint, s.history);
 			req.stream = true;
 			// 流式路径：delta 实时转发；累积器负责把三家协议的增量拼回完整响应。
 			// 通道不支持分块时 sendLlmRequest 自动降级返回完整 JSON（旧解析路径）。
@@ -803,6 +966,8 @@ function summarizeToolArgs(name: string, args: Record<string, unknown>): string 
 	switch (name) {
 		case 'search_modules':
 			return String(args.query || '').trim() ? `“${String(args.query).trim()}”` : '浏览目录';
+		case 'recommend_modules':
+			return String(args.query || '').trim() ? `“${String(args.query).trim()}”（Jev）` : '（Jev）';
 		case 'refresh_catalog':
 			return '全量重拉并落盘';
 		case 'self_check':
@@ -814,7 +979,7 @@ function summarizeToolArgs(name: string, args: Record<string, unknown>): string 
 		case 'propose_placement':
 			return Array.isArray(args.picks) ? `${args.picks.length} 个候选` : '候选';
 		case 'propose_export':
-			return '导出确认卡';
+			return Array.isArray(args.cbbUuids) && args.cbbUuids.length ? `按需导出 ${args.cbbUuids.length} 项` : '全量导出确认卡';
 		case 'compact_history':
 			return '折叠早期对话';
 		default:
