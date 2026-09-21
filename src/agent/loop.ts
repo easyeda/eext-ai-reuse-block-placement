@@ -1,33 +1,70 @@
 /**
  * 对话编排：多轮 tool 循环 + 确认卡令牌。
- * 模型只能调用 propose_* / get_catalog / self_check / goto_settings；
+ * 模型只能调用 propose_* / search_modules / get_module / refresh_catalog / self_check；
  * 真正的放置/编辑/导出由 iframe 持令牌调用。
  */
-import type { CatalogFetchReport, CatalogJson, CatalogModule, CatalogStatsView } from '../catalog';
+import type { CatalogJson, CatalogStatsView } from '../catalog';
 import type { CachedGeometry, PlaceBox, PlaceMode, PlaceTarget, RegionStyle } from '../cbb';
 import type { HistoryTurn } from './llm';
+import type { CatalogStoreRecord, FlatModule } from './store';
 import type { AgentToolName } from './tools';
-import { fetchCatalog, pageSupportOf } from '../catalog';
+import { fetchCatalog } from '../catalog';
 import { activateSchematicPage, cacheGeometry, collectPageObstacles, DEFAULT_PAGE_WIDTH, estimateGeometry, getCurrentDocState, loadGeometry, modifyCbbModule, parsePlaceTarget, placeCbbModule, planAlignedPlacement, premeasureGeometry, readCbbSchematicSummary } from '../cbb';
 import { effectiveLibraryScope, runSelfCheck } from '../env';
 import { exportProjectPackage } from '../pkg';
-import { getLlmSettings, getPlacementSettings } from '../settings';
-import { classifyLlmError, sendLlmRequest } from './http';
-import { buildAgentRequest, buildPingRequest, parseAgentResponse } from './llm';
-import { AGENT_TOOL_NAMES, buildAgentCatalogPayload, MAX_DESC_LEN } from './tools';
+import { getJevSettings, getLlmSettings, getPlacementSettings } from '../settings';
+import { classifyLlmError, registerAbort, releaseAbort, sendLlmRequest, STREAM_SENTINEL } from './http';
+import { recommendModules } from './jev';
+import { buildAgentRequest, buildPingRequest, parseAgentResponse, StreamAccumulator } from './llm';
+import { buildCatalogSummaryPayload, clearCatalogRecord, EMPTY_CATALOG_NOTE, flattenCatalog, humanizeAge, loadCatalogRecord, lookupModule, searchInCatalog, storeCatalog } from './store';
+import { AGENT_TOOL_NAMES, MAX_DESC_LEN } from './tools';
 
-const MAX_AGENT_ROUNDS = 4;
+/** 单条消息最多发起的模型调用轮数（每轮 = 思考 + 可选工具执行；工具结果驱动下一轮）。 */
+const MAX_AGENT_ROUNDS = 12;
 /** 单轮对话工具调用总量上限（Round ≠ Tool Call：模型一轮可返回多个调用，需独立限制防异常循环）。 */
-const MAX_TOOL_CALLS = 12;
+const MAX_TOOL_CALLS = 48;
 const MAX_HISTORY = 12;
-/** propose_placement 单卡最大候选数（与 schema maxItems 一致；网格批量放置的上限）。 */
-const MAX_PLACEMENT_PICKS = 20;
+/** compact_history 保留的最近用户轮次：折叠只影响更早的历史（trimHistory 的 12 轮硬兜底不变）。 */
+const COMPACT_KEEP_TURNS = 4;
+/** 注入轮数信号的阈值：超过该值时每轮提示建议调用 compact_history。 */
+const COMPACT_SUGGEST_TURNS = 8;
+/** propose_placement / recommend 自动出卡的单卡最大候选数（与 recommend limit 上限对齐）。 */
+const MAX_PLACEMENT_PICKS = 50;
+/** propose_export 按需导出单卡上限：超出部分截断并留在卡外（全量导出走省略参数的兜底路径）。 */
+const MAX_EXPORT_PICKS = 100;
+
+/** Agent 事件流：chatTurn 执行过程中实时推给 UI 的所有事件。 */
+export type AgentEvent
+	/** 一条思维链增量（仅思考模式且端点返回时出现）。 */
+	= | { type: 'reasoning_delta'; delta: string; round: number }
+	/** 一条正文增量（流式模式）。 */
+		| { type: 'text_delta'; delta: string; round: number }
+	/** 模型发起一次工具调用（UI 立即显示"Running"状态）。 */
+		| { type: 'tool_start'; name: string; argsSummary: string; round: number; args?: unknown }
+	/** 工具执行结束，与 tool_start 按 seqId 对应（UI 原位更新状态与结果）。 */
+		| { type: 'tool_end'; seqId: number; event: ChatToolEvent; round: number }
+	/** 提案确认卡生成（UI 立即渲染卡片，不等整轮结束）。 */
+		| { type: 'card'; card: ChatCardView }
+	/** 一个 agent 轮次结束（模型决定调工具 → 工具执行完毕，进入下一轮请求）。 */
+		| { type: 'round_end'; round: number }
+	/** 整轮结束的最终快照（含完整文本与状态，UI 用于对账）。 */
+		| { type: 'final'; result: ChatTurnResult };
+
+export interface ChatTurnCallbacks {
+	/** 每个事件实时回调；UI 不在场（如测试）时可不传。 */
+	onEvent?: (ev: AgentEvent) => void;
+}
+
+/** onEvent 缺省时的空实现。 */
+function noopEmitter(_ev: AgentEvent): void { /* 忽略 */ }
 
 export interface ChatToolEvent {
 	name: string;
 	argsSummary: string;
 	status: 'ok' | 'err' | 'skip';
 	detail?: unknown;
+	/** 模型传入的真实参数（截断后），UI 展示用。 */
+	args?: unknown;
 	error?: string;
 }
 
@@ -109,7 +146,7 @@ export interface PlaceCbbItem {
 
 /**
  * 确认卡令牌记录。status 之外必须绑定提案内容：confirm 以卡上载荷为权威，
- * 不信任客户端回传的 libraryUuid/cbbUuid——授权语义是「按这张���执行」，
+ * 不信任客户端回传的 libraryUuid/cbbUuid——授权语义是「按这张卡执行」，
  * 而非「持卡可对目录里任意模块执行一次」。
  */
 interface CardRecord {
@@ -123,8 +160,6 @@ interface CardRecord {
 
 interface ChatSession {
 	history: Array<HistoryTurn>;
-	catalog: CatalogJson | null;
-	catalogStats: CatalogStatsView | null;
 	cards: Map<string, CardRecord>;
 	/** 本会话内已成功做过原理图分析的模块 uuid（给编辑卡打"已分析"标记）。 */
 	analyzed: Set<string>;
@@ -135,7 +170,7 @@ const sessions = new Map<string, ChatSession>();
 function sessionOf(id: string): ChatSession {
 	let s = sessions.get(id);
 	if (!s) {
-		s = { history: [], catalog: null, catalogStats: null, cards: new Map(), analyzed: new Set() };
+		s = { history: [], cards: new Map(), analyzed: new Set() };
 		sessions.set(id, s);
 	}
 	return s;
@@ -172,39 +207,6 @@ function mergeStyleWithSettings(style?: RegionStyle): RegionStyle {
 	};
 }
 
-export function catalogStats(report: CatalogFetchReport): CatalogStatsView {
-	let emptyDesc = 0;
-	for (const lib of report.catalog.libraries) {
-		for (const m of lib.modules) {
-			if (!String(m.description || '').trim())
-				emptyDesc++;
-		}
-	}
-	return {
-		libraries: report.catalog.libraries.length,
-		modules: report.totalModules,
-		emptyDesc,
-		failed: report.failedLibraries,
-		elapsedMs: report.elapsedMs,
-	};
-}
-
-function flattenModules(catalog: CatalogJson): Array<CatalogModule & { libraryUuid: string; libraryKind: string; src: string; pageSupport: boolean }> {
-	const out: Array<CatalogModule & { libraryUuid: string; libraryKind: string; src: string; pageSupport: boolean }> = [];
-	for (const lib of catalog.libraries) {
-		for (const m of lib.modules) {
-			out.push({
-				...m,
-				libraryUuid: lib.libraryUuid,
-				libraryKind: lib.libraryKind,
-				src: lib.moduleName,
-				pageSupport: pageSupportOf(lib.libraryKind),
-			});
-		}
-	}
-	return out;
-}
-
 function invalidateOpenCards(s: ChatSession): void {
 	for (const rec of s.cards.values()) {
 		if (rec.status === 'open')
@@ -228,25 +230,26 @@ function settingsReady(): { ok: true } | { ok: false; missing: Array<string> } {
 	return missing.length ? { ok: false, missing } : { ok: true };
 }
 
-async function ensureCatalog(s: ChatSession, force: boolean): Promise<{ stats: CatalogStatsView; summary: string }> {
-	if (!force && s.catalog && s.catalogStats)
-		return { stats: s.catalogStats, summary: `使用会话目录快照：${s.catalogStats.modules} 个模块` };
+/**
+ * 确保目录记录可用：优先读持久化缓存（跨会话），缓存为空或 force 时拉取并落盘。
+ * 返回 summary 供工具结果与事件展示；force 时作废未处理确认卡。
+ */
+async function ensureCatalog(s: ChatSession, force: boolean): Promise<{ record: CatalogStoreRecord; summary: string }> {
+	if (!force) {
+		const cached = await loadCatalogRecord();
+		if (cached)
+			return { record: cached, summary: `使用持久化目录缓存：${cached.stats.modules} 个模块（${humanizeAge(Date.now() - cached.fetchedAt)}拉取）` };
+	}
 	const report = await fetchCatalog(await effectiveLibraryScope());
-	s.catalog = report.catalog;
-	s.catalogStats = catalogStats(report);
+	const stats = await storeCatalog(report);
 	if (force)
 		invalidateOpenCards(s);
-	const failed = report.catalog.libraries.filter(l => l.failed).map(l => `${l.moduleName}：${l.error}`).join('；');
+	const record = (await loadCatalogRecord())!;
+	const failed = record.catalog.libraries.filter(l => l.failed).map(l => `${l.moduleName}：${l.error}`).join('；');
 	const summary = failed
-		? `目录 ${s.catalogStats.modules} 个模块，失败库 ${s.catalogStats.failed}（${failed}）`
-		: `目录 ${s.catalogStats.modules} 个模块 / ${s.catalogStats.libraries} 库`;
-	return { stats: s.catalogStats, summary };
-}
-
-function lookupModule(s: ChatSession, cbbUuid: string) {
-	if (!s.catalog)
-		return null;
-	return flattenModules(s.catalog).find(m => m.uuid === cbbUuid) || null;
+		? `目录 ${stats.modules} 个模块，失败库 ${stats.failed}（${failed}）`
+		: `目录 ${stats.modules} 个模块 / ${stats.libraries} 库`;
+	return { record, summary };
 }
 
 function trimHistory(s: ChatSession): void {
@@ -278,6 +281,16 @@ function toolResultJson(value: unknown): string {
 	}
 }
 
+/** UI 展示用 JSON 截断：完整数据要给模型，给用户看的只保留开头防刷屏。 */
+const UI_JSON_PREVIEW_LEN = 600;
+
+function uiJsonPreview(value: unknown): string {
+	const text = toolResultJson(value);
+	if (text.length <= UI_JSON_PREVIEW_LEN)
+		return text;
+	return `${text.slice(0, UI_JSON_PREVIEW_LEN)}…（已截断，共 ${text.length} 字符）`;
+}
+
 interface ToolRunOutcome {
 	event: ChatToolEvent;
 	card?: ChatCardView;
@@ -286,11 +299,24 @@ interface ToolRunOutcome {
 }
 type ToolHandler = (s: ChatSession, args: Record<string, unknown>, bridgeVersion: string) => Promise<ToolRunOutcome>;
 
-/** 目录快照缺失时返回统一的错误结果，引导模型先调用 get_catalog——目录获取的唯一入口。 */
+/** 目录缓存为空时返回统一的错误结果，引导模型先调用 refresh_catalog。 */
 function missingCatalogOutcome(name: AgentToolName): ToolRunOutcome {
 	return {
-		event: { name, argsSummary: '缺少目录快照', status: 'err', error: '当前没有目录快照' },
-		result: { ok: false, error: '当前没有目录快照，请先调用 get_catalog 获取目录后再执行本工具。' },
+		event: { name, argsSummary: '目录缓存为空', status: 'err', error: '当前没有目录缓存' },
+		result: { ok: false, error: EMPTY_CATALOG_NOTE },
+	};
+}
+
+/** 检索结果 → 紧凑条目（给 LLM 看的最小字段集）。 */
+function compactHit(hit: { module: FlatModule }): Record<string, unknown> {
+	const m = hit.module;
+	return {
+		cbbUuid: m.uuid,
+		name: m.name,
+		classification: m.classification || [],
+		libraryKind: m.libraryKind,
+		pageSupport: m.pageSupport,
+		descBrief: (m.description || '').slice(0, 80) || undefined,
 	};
 }
 
@@ -300,12 +326,174 @@ function missingCatalogOutcome(name: AgentToolName): ToolRunOutcome {
  * 每个 handler 独立作用域，event.name 用字面量，避免与模块名等局部变量遮蔽。
  */
 const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
-	get_catalog: async (s, args) => {
-		const force = args.force === true;
-		const got = await ensureCatalog(s, force);
+	search_modules: async (_s, args) => {
+		const rec = await loadCatalogRecord();
+		if (!rec)
+			return missingCatalogOutcome('search_modules');
+		const query = typeof args.query === 'string' ? args.query : '';
+		const limit = Math.min(Math.max(typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 10, 1), 30);
+		const hits = searchInCatalog(rec, query, limit);
 		return {
-			event: { name: 'get_catalog', argsSummary: force ? 'force 刷新' : '按设置中的库范围', status: 'ok', detail: got.stats },
-			result: { ok: true, stats: got.stats, catalog: buildAgentCatalogPayload(s.catalog!) },
+			event: { name: 'search_modules', argsSummary: query ? `“${query}”` : '浏览前若干条', status: 'ok', detail: { matched: hits.length, limit } },
+			result: {
+				ok: true,
+				matched: hits.length,
+				modules: hits.map(compactHit),
+				hint: hits.length ? '推荐/放置/编辑前用 get_module 获取目标模块完整详情；cbbUuid 必须逐字复制。' : '没有匹配模块。可换关键词重试，或提示用户把开源广场模块复制到个人库后 refresh_catalog。',
+			},
+		};
+	},
+	recommend_modules: async (s, args) => {
+		const query = String(args.query || '').trim();
+		const limit = Math.min(Math.max(typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 10, 1), 50);
+		const jev = getJevSettings();
+		// 未配置 Key：温和回落（不报错）——提示模型改用 search_modules 完成本次需求，并可顺带提醒补 Key。
+		if (!jev.apiKey.trim()) {
+			return {
+				event: { name: 'recommend_modules', argsSummary: query || '(空)', status: 'skip', detail: { reason: '未配置 Jev API Key（可选增强）' } },
+				result: {
+					ok: true,
+					available: false,
+					modules: [],
+					hint: 'Jev 语义推荐未配置 API Key（可选增强，不阻塞使用）。请改用 search_modules 关键词检索完成本次需求；可顺带提醒用户：到 设置 → Jev 语义推荐 补充 API Key 后即可启用语义推荐（非必需）。',
+				},
+			};
+		}
+		if (!query) {
+			return {
+				event: { name: 'recommend_modules', argsSummary: '(空需求)', status: 'err', error: 'query 为空' },
+				result: { ok: false, error: 'query 不能为空：请把用户原始需求整句传入（无需提取关键词）。' },
+			};
+		}
+		const rec = await loadCatalogRecord();
+		if (!rec)
+			return missingCatalogOutcome('recommend_modules');
+		try {
+			const r = await recommendModules(jev, rec, query, limit);
+			// Jev 模式下本工具接管检索/详情/排序全程：返回全量明细，LLM 无需再调 get_module。
+			const modules = r.hits.map(h => ({
+				cbbUuid: h.module.uuid,
+				name: h.module.name,
+				desc: h.module.description || '',
+				classification: h.module.classification || [],
+				libraryKind: h.module.libraryKind,
+				src: h.module.src,
+				pageSupport: h.module.pageSupport,
+				storage: h.module.storage,
+				jevScore: h.score,
+				jevConfidence: h.confidence,
+				jevCategory: h.category,
+			}));
+			const notFoundHint = r.hits.length ? undefined : '所需类别下没有模块或全部得分过低（注意：不能断言目录中没有该类模块——可能是类别筛选未覆盖，可用 search_modules 关键词复核）。也可请用户把开源广场模块复制到个人库后 refresh_catalog。';
+			// 意图为放置 → 工具内直接出卡（与 propose_placement 同构：令牌绑定提案 uuid 集合），
+			// LLM 不再经手 picks/mode/target——mode/target 由 Jev 意图判定给出，reason 由分数模板生成。
+			if (r.placement?.place && r.hits.length) {
+				const picks: Array<PlacePickView> = r.hits.slice(0, MAX_PLACEMENT_PICKS).map((h) => {
+					let mode: PlaceMode = r.placement!.pageMode ? 'page' : 'symbol';
+					if (mode === 'page' && !h.module.pageSupport)
+						mode = 'symbol';
+					return {
+						uuid: h.module.uuid,
+						libraryUuid: h.module.libraryUuid,
+						name: h.module.name,
+						src: h.module.src,
+						reason: `Jev 匹配 ${h.score}/10 · ${h.category}`,
+						pageSupport: h.module.pageSupport,
+						mode,
+						target: parsePlaceTarget(r.placement!.target),
+					};
+				});
+				const token = newToken();
+				s.cards.set(token, { type: 'place', status: 'open', allowedUuids: new Set(picks.map(p => p.uuid)) });
+				const card: PlaceCardView = { type: 'place', token, picks, filtered: [], notFoundHint: undefined };
+				return {
+					event: {
+						name: 'recommend_modules',
+						argsSummary: `“${query}”`,
+						status: 'ok',
+						detail: { neededCategories: r.neededCategories.map(c => c.label), categoryHits: r.categoryHits, scored: r.scored, cardPicks: picks.length, target: r.placement.target, elapsedMs: r.elapsedMs },
+					},
+					card,
+					result: {
+						ok: true,
+						cardShown: true,
+						token,
+						target: r.placement.target,
+						neededCategories: r.neededCategories,
+						categoryHits: r.categoryHits,
+						matched: r.hits.length,
+						modules,
+						hint: '放置确认卡已自动出示（跨类别轮转选取：各子系统槽位都有代表；用户在卡上勾选确认后才会改动画布）。直接用中文说明推荐结果即可，禁止再调用 propose_placement 重复出卡。',
+					},
+				};
+			}
+			return {
+				event: {
+					name: 'recommend_modules',
+					argsSummary: `“${query}”`,
+					status: 'ok',
+					detail: { neededCategories: r.neededCategories.map(c => c.label), categoryHits: r.categoryHits, scored: r.scored, placeIntent: r.placement?.prob, elapsedMs: r.elapsedMs },
+				},
+				result: {
+					ok: true,
+					cardShown: false,
+					neededCategories: r.neededCategories,
+					categoryHits: r.categoryHits,
+					placement: r.placement,
+					matched: r.hits.length,
+					modules,
+					notFoundHint,
+					hint: r.hits.length
+						? '放置意图未达自动出卡线：先用文字按类别分组给出方案（引用 jevScore），并询问用户是否放置。仅当用户明确要求放置时才调 propose_placement 出卡（picks 直接取 modules 的 cbbUuid/name，mode/target 参考 placement 字段）；用户未要求时不要出卡。'
+						: '没有合适模块：把 notFoundHint 转述给用户。',
+				},
+			};
+		}
+		catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return {
+				event: { name: 'recommend_modules', argsSummary: `“${query}”`, status: 'err', error: msg },
+				result: { ok: false, error: `Jev 推荐失败：${msg}。请改用 search_modules 关键词检索。` },
+			};
+		}
+	},
+	get_module: async (_s, args) => {
+		const rec = await loadCatalogRecord();
+		if (!rec)
+			return missingCatalogOutcome('get_module');
+		const cbbUuid = String(args.cbbUuid || '');
+		const hit = await lookupModule(cbbUuid);
+		if (!hit) {
+			return {
+				event: { name: 'get_module', argsSummary: cbbUuid || '(空)', status: 'err', error: '目录外 uuid' },
+				result: { ok: false, error: 'cbbUuid 不在当前目录缓存中。请用 search_modules 重新检索获取有效 uuid。' },
+			};
+		}
+		return {
+			event: { name: 'get_module', argsSummary: hit.name, status: 'ok' },
+			result: {
+				ok: true,
+				module: {
+					cbbUuid: hit.uuid,
+					libraryUuid: hit.libraryUuid,
+					name: hit.name,
+					description: hit.description || '',
+					classification: hit.classification || [],
+					boards: hit.boards || [],
+					storage: hit.storage,
+					localFilePath: hit.localFilePath,
+					localBackupDir: hit.localBackupDir,
+					libraryKind: hit.libraryKind,
+					pageSupport: hit.pageSupport,
+				},
+			},
+		};
+	},
+	refresh_catalog: async (s) => {
+		const got = await ensureCatalog(s, true);
+		return {
+			event: { name: 'refresh_catalog', argsSummary: '全量重拉并落盘', status: 'ok', detail: got.record.stats },
+			result: { ok: true, stats: got.record.stats, summary: got.summary },
 		};
 	},
 	self_check: async (_s, _args, bridgeVersion) => {
@@ -315,41 +503,75 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			result: { ok: true, text },
 		};
 	},
-	goto_settings: async () => {
-		return {
-			event: { name: 'goto_settings', argsSummary: '切到设置', status: 'ok' },
-			gotoSettings: true,
-			result: { ok: true },
-		};
-	},
-	propose_export: async (s) => {
-		if (!s.catalog)
+	propose_export: async (s, args) => {
+		const rec = await loadCatalogRecord();
+		if (!rec)
 			return missingCatalogOutcome('propose_export');
-		const picks: Array<ExportPickView> = flattenModules(s.catalog!).map(m => ({
-			uuid: m.uuid,
-			name: m.name,
-			src: m.src,
-			storage: m.storage,
-			hasFile: m.storage === 'local' && m.filePathSource === 'indexed',
-		}));
+		// 按需导出（与放置 picks 同思路）：传入 cbbUuids 时卡上只列这些模块（逐个对目录校验，
+		// 无效的进 filtered 回显）；省略时兜底为全量目录（仅用户明确要导出全部时应省略）。
+		const requested = Array.isArray(args.cbbUuids)
+			? (args.cbbUuids as Array<unknown>).map(u => String(u || '').trim()).filter(Boolean).slice(0, MAX_EXPORT_PICKS)
+			: null;
+		const picks: Array<ExportPickView> = [];
+		const filtered: Array<string> = [];
+		if (requested) {
+			for (const uuid of requested) {
+				const hit = await lookupModule(uuid);
+				if (!hit) {
+					filtered.push(uuid);
+					continue;
+				}
+				picks.push({
+					uuid: hit.uuid,
+					name: hit.name,
+					src: hit.src,
+					storage: hit.storage,
+					hasFile: hit.storage === 'local' && hit.filePathSource === 'indexed',
+				});
+			}
+			if (!picks.length) {
+				return {
+					event: { name: 'propose_export', argsSummary: `${filtered.length} 个无效 uuid`, status: 'err', error: '提供的 cbbUuids 均不在目录中' },
+					result: { ok: false, error: '提供的 cbbUuids 均不在当前目录缓存中：请用 search_modules / recommend_modules 重新获取有效 uuid，或省略 cbbUuids 导出全部目录。' },
+				};
+			}
+		}
+		else {
+			picks.push(...flattenCatalog(rec.catalog).map(m => ({
+				uuid: m.uuid,
+				name: m.name,
+				src: m.src,
+				storage: m.storage,
+				hasFile: m.storage === 'local' && m.filePathSource === 'indexed',
+			})));
+		}
 		const token = newToken();
 		s.cards.set(token, { type: 'export', status: 'open', allowedUuids: new Set(picks.map(p => p.uuid)) });
-		const card: ExportCardView = { type: 'export', token, stats: s.catalogStats!, picks };
+		const card: ExportCardView = { type: 'export', token, stats: rec.stats, picks };
 		return {
-			event: { name: 'propose_export', argsSummary: `${card.stats.modules} 模块`, status: 'ok' },
+			event: { name: 'propose_export', argsSummary: requested ? `按需 ${picks.length} 项${filtered.length ? `（${filtered.length} 个无效 uuid 已剔除）` : ''}` : `全量 ${card.stats.modules} 模块`, status: 'ok', detail: { filtered: filtered.length ? filtered : undefined } },
 			card,
-			result: { ok: true, token, stats: card.stats, hint: '已出示导出确认卡（默认全选），等待用户勾选并确认后才会写文件' },
+			result: {
+				ok: true,
+				token,
+				stats: card.stats,
+				filtered: filtered.length ? filtered : undefined,
+				hint: requested
+					? '已出示按需导出确认卡（只含指定模块，默认全选），等待用户确认后才会写文件；用户在卡上仍可增删勾选（全量清单不在此卡上）。'
+					: '已出示全量导出确认卡（目录全部模块，默认全选），等待用户勾选并确认后才会写文件。',
+			},
 		};
 	},
 	inspect_module: async (s, args) => {
-		if (!s.catalog)
+		const rec = await loadCatalogRecord();
+		if (!rec)
 			return missingCatalogOutcome('inspect_module');
 		const cbbUuid = String(args.cbbUuid || '');
-		const hit = lookupModule(s, cbbUuid);
+		const hit = await lookupModule(cbbUuid);
 		if (!hit) {
 			return {
 				event: { name: 'inspect_module', argsSummary: cbbUuid || '(空)', status: 'err', error: '目录外 uuid' },
-				result: { ok: false, error: 'cbbUuid 不在当前目录中' },
+				result: { ok: false, error: 'cbbUuid 不在当前目录缓存中。请用 search_modules 重新检索获取有效 uuid。' },
 			};
 		}
 		try {
@@ -379,14 +601,15 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		}
 	},
 	propose_edit: async (s, args) => {
-		if (!s.catalog)
+		const rec = await loadCatalogRecord();
+		if (!rec)
 			return missingCatalogOutcome('propose_edit');
 		const cbbUuid = String(args.cbbUuid || '');
-		const hit = lookupModule(s, cbbUuid);
+		const hit = await lookupModule(cbbUuid);
 		if (!hit) {
 			return {
 				event: { name: 'propose_edit', argsSummary: cbbUuid || '(空)', status: 'err', error: '目录外 uuid' },
-				result: { ok: false, error: 'cbbUuid 不在当前目录中' },
+				result: { ok: false, error: 'cbbUuid 不在当前目录缓存中。请用 search_modules 重新检索获取有效 uuid。' },
 			};
 		}
 		// 运行时兜底校验：描述超长直接截断到与目录载荷一致的口径（prompt 只是行为引导，不是安全边界）。
@@ -413,23 +636,23 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		};
 	},
 	propose_placement: async (s, args) => {
-		if (!s.catalog)
+		const rec = await loadCatalogRecord();
+		if (!rec)
 			return missingCatalogOutcome('propose_placement');
 		const raw = Array.isArray(args.picks) ? args.picks as Array<Record<string, unknown>> : [];
 		const filtered: Array<string> = [];
 		const picks: Array<PlacePickView> = [];
 		for (const it of raw.slice(0, MAX_PLACEMENT_PICKS)) {
 			const uuid = typeof it.cbbUuid === 'string' ? it.cbbUuid : '';
-			const hit = lookupModule(s, uuid);
+			const hit = await lookupModule(uuid);
 			if (!hit) {
 				filtered.push(`${String(it.name || uuid || '(空)')}（不在目录中）`);
 				continue;
 			}
-			// 默认图页形式：模块符号可能尚未生成（空符号不可见且会重叠），仅 LLM 显式给 symbol 才用符号。
-			// pageSupport 兜底：不支持图页的库类型强制回符号（2026-09-16 起三类库均支持图页——
-			// 本地库 uuid 由 .eprj2 解析，不再依赖会崩溃的 lib_Cbb.get）。
-			let mode: PlaceMode = it.mode === 'symbol' ? 'symbol' : 'page';
-			if (!hit.pageSupport)
+			// 默认符号形式（更轻量、放置后即时可见）：仅 LLM 显式给 page 才用图页。
+			// pageSupport 兜底：用户点名图页但该库类型不支持时回符号。
+			let mode: PlaceMode = it.mode === 'page' ? 'page' : 'symbol';
+			if (mode === 'page' && !hit.pageSupport)
 				mode = 'symbol';
 			const target: PlaceTarget = parsePlaceTarget(it.target);
 			picks.push({
@@ -467,6 +690,42 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			result: { ok: true, token, picks: picks.map(p => p.name), filtered, hint: '已出示放置确认卡，等待用户确认后才会改动画布' },
 		};
 	},
+	compact_history: async (s, args) => {
+		const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+		if (!summary) {
+			return {
+				event: { name: 'compact_history', argsSummary: '摘要为空', status: 'err', error: '缺少 summary' },
+				result: { ok: false, error: 'summary 不能为空：把此前对话的完整摘要（用户的要求与约束、已完成/进行中的事项、已达成的决定）写入 summary 后重试。' },
+			};
+		}
+		const users = s.history.filter(h => h.role === 'user').length;
+		if (users <= COMPACT_KEEP_TURNS) {
+			return {
+				event: { name: 'compact_history', argsSummary: '历史较短', status: 'skip' },
+				result: { ok: true, compacted: false, hint: `当前仅 ${users} 轮对话，无需折叠。` },
+			};
+		}
+		// 保留窗口起点：倒数第 COMPACT_KEEP_TURNS 个用户消息处；其后内容（含工具流量与进行中的本轮）原样保留。
+		let seen = 0;
+		let idx = 0;
+		for (let i = s.history.length - 1; i >= 0; i--) {
+			if (s.history[i].role === 'user') {
+				seen++;
+				if (seen === COMPACT_KEEP_TURNS) {
+					idx = i;
+					break;
+				}
+			}
+		}
+		const dropped = users - COMPACT_KEEP_TURNS;
+		// 摘要以用户轮占位（与 trimHistory 的折叠存根同构）：摘要由调用模型在参数里自带，
+		// 此刻完整历史仍在该模型上下文中，它自己就是摘要器——不发起额外 LLM 请求。
+		s.history = [{ role: 'user', content: `[对话摘要] ${summary}` }, ...s.history.slice(idx)];
+		return {
+			event: { name: 'compact_history', argsSummary: `折叠 ${dropped} 轮`, status: 'ok' },
+			result: { ok: true, compacted: true, droppedTurns: dropped, hint: '已折叠早期对话，最近几轮原样保留；基于摘要与保留轮次继续当前任务。' },
+		};
+	},
 };
 
 function isAgentToolName(name: string): name is AgentToolName {
@@ -489,16 +748,25 @@ async function runTool(
 	return TOOL_HANDLERS[name](s, args, bridgeVersion);
 }
 
-export async function chatTurn(sessionId: string, userText: string, bridgeVersion: string): Promise<ChatTurnResult> {
+export async function chatTurn(
+	sessionId: string,
+	userText: string,
+	bridgeVersion: string,
+	callbacks?: ChatTurnCallbacks,
+): Promise<ChatTurnResult> {
 	const text = redactSecrets((userText || '').trim());
 	const s = sessionOf(sessionId);
 	const tools: Array<ChatToolEvent> = [];
 	const cards: Array<ChatCardView> = [];
 	let gotoSettings = false;
 	let toolCallCount = 0;
+	const emit = callbacks?.onEvent ?? noopEmitter;
+	const ac = registerAbort(sessionId);
+	const signal = ac.signal;
 
 	const ready = settingsReady();
 	if (!ready.ok) {
+		releaseAbort(sessionId);
 		return {
 			assistantText: `尚未配置模型接入（缺少 ${ready.missing.join('、')}）。请到 设置 → 模型接入 填写 baseUrl / apiKey / model。出站走嘉立创代理，请使用国内可达端点，不要填 api.openai.com。`,
 			tools,
@@ -509,30 +777,100 @@ export async function chatTurn(sessionId: string, userText: string, bridgeVersio
 		};
 	}
 
-	// 目录获取完全由模型调用 get_catalog 驱动（提示词与上下文标注引导），插件不在循环外自动预取。
+	/** 用户中止的统一出口：已推送的增量作废，恢复话术由 UI 以中止标记呈现。 */
+	function abortedResult(): ChatTurnResult {
+		return {
+			assistantText: '（已停止）',
+			tools,
+			cards,
+			gotoSettings,
+			llmConfigured: true,
+			error: { kind: 'aborted', message: '用户中止了本轮回复', gotoSettings: false },
+		};
+	}
+
+	// 目录获取完全由模型调用 search_modules / refresh_catalog 驱动（提示词与上下文摘要引导），插件不在循环外自动预取。
 	s.history.push({ role: 'user', content: text });
 	trimHistory(s);
 
 	try {
 		for (let round = 0; round < MAX_AGENT_ROUNDS; round++) {
-			// 每轮重建目录注入：get_catalog(force) 更新会话快照后旧注入必须作废，
-			// 否则同轮上下文里 system 是旧目录、observation 是新目录，模型会被两份目录打架。
-			const catalogNote = s.catalog
-				? `\n\n当前目录快照（JSON）：\n${buildAgentCatalogPayload(s.catalog)}`
-				: '\n\n当前没有可用目录快照。请先调用 get_catalog。';
+			if (signal.aborted)
+				return abortedResult();
+			// 每轮重建目录摘要注入：refresh_catalog 落盘后旧摘要必须作废，
+			// 否则同轮上下文里是旧统计、observation 是新统计，模型会被两份数据打架。
+			// 摘要仅含统计 + 各库计数 + 新鲜度（几百 token）；模块明细走 search_modules/get_module。
+			// loadCatalogRecord 读内存缓存 → sys_Storage（唯一持久层）：扩展重启后内存层为空，
+			// 首轮经此从落盘缓存回填——持久化缓存有效时注入真实摘要而非"缓存为空"，
+			// 避免模型每次重启都盲目 refresh_catalog 重拉全量（约 20 秒）；refresh 落盘后内存层已更新，仍即时生效。
+			const catalogRecord = await loadCatalogRecord();
+			const userTurns = s.history.filter(h => h.role === 'user').length;
+			// 轮数信号：模型无法自数轮数，注入确定性计数；超过阈值时明确建议压缩（compact_history）。
+			const historyNote = `\n\n当前对话 ${userTurns} 轮${userTurns > COMPACT_SUGGEST_TURNS ? '，建议调用 compact_history 折叠早期对话（把此前对话的完整摘要写入 summary 参数）' : ''}。`;
+			const jev = getJevSettings();
+			const jevReady = jev.apiKey.trim() !== '';
+			const catalogNote = catalogRecord
+				? `\n\n目录缓存摘要（模块明细不在上下文中，找模块按 search_modules / recommend_modules 分工检索）：\n${buildCatalogSummaryPayload(catalogRecord)}${historyNote}`
+				: `\n\n${EMPTY_CATALOG_NOTE}${historyNote}`;
+			// 上下文提示：两个检索工具并存分工（与两工具 description 的「分工」段成对维护）——
+			// 精确关键词走 search_modules（零成本），宽泛/功能描述式需求走 recommend_modules（语义+排序+自动出卡）。
+			// 未配置 Jev Key 时提示模型直接用关键词检索，并顺带提醒用户可补 Key（不阻塞、不强制）。
+			const jevHint = jevReady
+				? '\n\n找模块按分工二选一：模块名/型号/器件名等精确关键词用 search_modules；需求宽泛、口语化或按功能描述、以及用户要推荐排序时用 recommend_modules，query 直接传用户原始需求整句。recommend_modules 返回 cardShown=true 时放置卡已自动出示，禁止再调 propose_placement 重复出卡，直接写最终说明；cardShown=false 时按返回的 modules（含全量描述与 jevScore）直接回答，不要调 get_module 重复取详情，且不要主动出示放置卡——仅当用户明确要求放置时才调 propose_placement（picks 取自 modules，mode/target 参考 placement 字段），否则给文字方案并询问是否放置。'
+				: '\n\n当前未配置 Jev API Key（可选增强）：recommend_modules 暂不可用，找模块直接用 search_modules；可顺带提醒用户到 设置 → Jev模型接入 补充 API Key（非必需）。';
 			const settings = getLlmSettings();
-			const req = buildAgentRequest(settings, catalogNote, s.history);
-			const data = await sendLlmRequest(req);
-			const parsed = parseAgentResponse(settings.provider, data);
+			const req = buildAgentRequest(settings, catalogNote + jevHint, s.history);
+			req.stream = true;
+			// 流式路径：delta 实时转发；累积器负责把三家协议的增量拼回完整响应。
+			// 通道不支持分块时 sendLlmRequest 自动降级返回完整 JSON（旧解析路径）。
+			const acc = new StreamAccumulator();
+			const data = await sendLlmRequest(req, {
+				onChunk: (chunk) => {
+					const { textDelta, reasoningDelta } = acc.feed(settings.provider, chunk);
+					if (reasoningDelta)
+						emit({ type: 'reasoning_delta', delta: reasoningDelta, round });
+					if (textDelta)
+						emit({ type: 'text_delta', delta: textDelta, round });
+				},
+			}, signal);
+			if (signal.aborted)
+				return abortedResult();
+			// STREAM_SENTINEL：流式路径已完成（载荷经 acc 拼装）；否则为缓冲完整 JSON。
+			const streamed = data === STREAM_SENTINEL;
+			const parsed = streamed ? acc.result() : parseAgentResponse(settings.provider, data);
+			if (!streamed) {
+				// 缓冲路径没走过增量回调：整段一次性补发，UI 渲染口径与流式一致。
+				if (parsed.reasoning)
+					emit({ type: 'reasoning_delta', delta: parsed.reasoning, round });
+				if (parsed.text)
+					emit({ type: 'text_delta', delta: parsed.text, round });
+			}
 			if (!parsed.toolCalls.length) {
 				const assistantText = redactSecrets(parsed.text || '（模型没有返回文本）');
 				s.history.push({ role: 'assistant', content: assistantText });
-				return { assistantText, tools, cards, gotoSettings, llmConfigured: true };
+				const finalResult: ChatTurnResult = { assistantText, tools, cards, gotoSettings, llmConfigured: true };
+				emit({ type: 'final', result: finalResult });
+				return finalResult;
 			}
 			s.history.push({ role: 'assistant', content: parsed.text || '', toolCalls: parsed.toolCalls });
+			// 思维链属于过程信息，不进 history（避免污染下一轮上下文与 token 预算）。
 			for (const call of parsed.toolCalls) {
+				// 用户中止：补写占位工具结果，保持 assistant(tool_calls)/tool 成对，下一轮请求才合法。
+				if (signal.aborted) {
+					s.history.push({
+						role: 'tool',
+						content: toolResultJson({ ok: false, error: '用户中止了本轮回复' }),
+						toolCallId: call.id,
+						toolName: call.name,
+					});
+					return abortedResult();
+				}
+				const args = (call.arguments && typeof call.arguments === 'object' ? call.arguments : {}) as Record<string, unknown>;
 				if (toolCallCount >= MAX_TOOL_CALLS) {
-					tools.push({ name: call.name, argsSummary: '已达调用总量上限', status: 'skip', error: '工具调用总量已达上限' });
+					const skipEvent: ChatToolEvent = { name: call.name, argsSummary: '已达调用总量上限', status: 'skip', error: '工具调用总量已达上限', args: uiJsonPreview(args) };
+					tools.push(skipEvent);
+					emit({ type: 'tool_start', name: call.name, argsSummary: '已达调用总量上限', round, args: uiJsonPreview(args) });
+					emit({ type: 'tool_end', seqId: tools.length - 1, event: skipEvent, round });
 					s.history.push({
 						role: 'tool',
 						content: toolResultJson({ ok: false, error: '工具调用总量已达上限，请基于已有信息直接总结回复用户' }),
@@ -542,14 +880,31 @@ export async function chatTurn(sessionId: string, userText: string, bridgeVersio
 					continue;
 				}
 				toolCallCount++;
-				const args = (call.arguments && typeof call.arguments === 'object' ? call.arguments : {}) as Record<string, unknown>;
+				const argsSummary = summarizeToolArgs(call.name, args);
+				emit({ type: 'tool_start', name: call.name, argsSummary, round, args: uiJsonPreview(args) });
+				const seqId = tools.length;
 				try {
-					const ran = await runTool(s, call.name, args, bridgeVersion);
+					// 工具内中止检查：长工具（refresh_catalog / inspect_module）执行完立即停下，不再发起下一轮。
+					const ran = signal.aborted ? null : await runTool(s, call.name, args, bridgeVersion);
+					if (!ran) {
+						tools.push({ name: call.name, argsSummary, status: 'skip', error: '用户中止', args: uiJsonPreview(args) });
+						s.history.push({
+							role: 'tool',
+							content: toolResultJson({ ok: false, error: '用户中止了本轮回复' }),
+							toolCallId: call.id,
+							toolName: call.name,
+						});
+						return abortedResult();
+					}
+					ran.event.args = uiJsonPreview(args);
 					tools.push(ran.event);
-					if (ran.card)
+					if (ran.card) {
 						cards.push(ran.card);
+						emit({ type: 'card', card: ran.card });
+					}
 					if (ran.gotoSettings)
 						gotoSettings = true;
+					emit({ type: 'tool_end', seqId, event: ran.event, round });
 					s.history.push({
 						role: 'tool',
 						content: toolResultJson(ran.result),
@@ -559,7 +914,9 @@ export async function chatTurn(sessionId: string, userText: string, bridgeVersio
 				}
 				catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
-					tools.push({ name: call.name, argsSummary: '', status: 'err', error: msg });
+					const errEvent: ChatToolEvent = { name: call.name, argsSummary: '', status: 'err', error: msg, args: uiJsonPreview(args) };
+					tools.push(errEvent);
+					emit({ type: 'tool_end', seqId, event: errEvent, round });
 					s.history.push({
 						role: 'tool',
 						content: toolResultJson({ ok: false, error: msg }),
@@ -568,21 +925,27 @@ export async function chatTurn(sessionId: string, userText: string, bridgeVersio
 					});
 				}
 			}
+			// 本轮工具全部执行完毕：通知 UI 轮次边界（下一轮请求即将发出，模型会重新思考）。
+			emit({ type: 'round_end', round });
 		}
-		return {
+		const capped: ChatTurnResult = {
 			assistantText: '本轮工具调用次数已达上限。你可以再发一条消息继续，或直接在确认卡上操作。',
 			tools,
 			cards,
 			gotoSettings,
 			llmConfigured: true,
 		};
+		emit({ type: 'final', result: capped });
+		return capped;
 	}
 	catch (e) {
+		if (signal.aborted)
+			return abortedResult();
 		const { kind, message } = classifyLlmError(e);
 		const goto = kind === 'auth' || kind === 'path' || kind === 'unconfigured' || kind === 'permission';
 		// llm.request 伪工具事件已移除：出站 HTTP 是插件行为而非模型工具调用，
 		// 失败信息经 assistantText 恢复话术与 error 字段呈现。
-		return {
+		const failed: ChatTurnResult = {
 			assistantText: recoverySpeech(kind, message),
 			tools,
 			cards,
@@ -590,6 +953,37 @@ export async function chatTurn(sessionId: string, userText: string, bridgeVersio
 			llmConfigured: true,
 			error: { kind, message, gotoSettings: goto },
 		};
+		emit({ type: 'final', result: failed });
+		return failed;
+	}
+	finally {
+		releaseAbort(sessionId);
+	}
+}
+
+/** tool_start 的参数摘要：与各工具 event.argsSummary 的口径保持一致（轻量，不发敏感内容）。 */
+function summarizeToolArgs(name: string, args: Record<string, unknown>): string {
+	switch (name) {
+		case 'search_modules':
+			return String(args.query || '').trim() ? `“${String(args.query).trim()}”` : '浏览目录';
+		case 'recommend_modules':
+			return String(args.query || '').trim() ? `“${String(args.query).trim()}”（Jev）` : '（Jev）';
+		case 'refresh_catalog':
+			return '全量重拉并落盘';
+		case 'self_check':
+			return '宿主 API 面';
+		case 'inspect_module':
+		case 'propose_edit':
+		case 'get_module':
+			return String(args.cbbUuid || '(待解析)');
+		case 'propose_placement':
+			return Array.isArray(args.picks) ? `${args.picks.length} 个候选` : '候选';
+		case 'propose_export':
+			return Array.isArray(args.cbbUuids) && args.cbbUuids.length ? `按需导出 ${args.cbbUuids.length} 项` : '全量导出确认卡';
+		case 'compact_history':
+			return '折叠早期对话';
+		default:
+			return '';
 	}
 }
 
@@ -624,6 +1018,11 @@ function requireCard(sessionId: string, token: string, type: CardRecord['type'])
 	return { session: s, card };
 }
 
+/** 仅取卡记录（不需要 session 的路径：如导出确认后置 done）。 */
+function requireCardRecord(sessionId: string, token: string): CardRecord | undefined {
+	return sessionOf(sessionId).cards.get(token);
+}
+
 export async function confirmPlace(
 	sessionId: string,
 	token: string,
@@ -641,19 +1040,17 @@ export async function confirmPlace(
 			throw new Error(`模块 ${it.name || it.cbbUuid} 不在这张确认卡的提案中，请重新发起。`);
 	}
 	for (const it of items) {
-		if (!s.catalog)
-			throw new Error('目录快照已因写库操作失效，请重新发起放置（下一条消息会自动拉取最新目录）。');
-		const hit = lookupModule(s, it.cbbUuid);
+		const hit = await lookupModule(it.cbbUuid);
 		if (!hit || hit.libraryUuid !== it.libraryUuid)
-			throw new Error(`模块 ${it.name || it.cbbUuid} 不在当前目录中`);
-		if (it.mode === 'page' && !pageSupportOf(hit.libraryKind))
+			throw new Error(`模块 ${it.name || it.cbbUuid} 不在当前目录缓存中`);
+		if (it.mode === 'page' && !hit.pageSupport)
 			throw new Error(`${it.name} 所在库不支持复用模块图页放置`);
 	}
 	// 目录权威模块名（与 items 同序）：本地库图页放置按它定位 .eprj2（卡上的 it.name 可被用户改，不作文件定位键）。
-	const moduleNames = items.map((it) => {
-		const hit = s.catalog ? lookupModule(s, it.cbbUuid) : null;
+	const moduleNames = await Promise.all(items.map(async (it) => {
+		const hit = await lookupModule(it.cbbUuid);
 		return hit?.name || it.name;
-	});
+	}));
 	const origin = await getCurrentDocState();
 	const staysOnPage = (t: PlaceTarget) => t === 'current' || t === 'new';
 	const needsOrigin = items.some(it => staysOnPage(parsePlaceTarget(it.target)));
@@ -766,11 +1163,10 @@ export async function confirmEdit(
 		const rec = s.cards.get(token);
 		if (rec)
 			rec.status = 'done';
-		// 写库成功后本会话目录快照立即失效：服务器端模块标识与内容都可能变化，
-		// 继续沿用旧快照提议放置会拿旧 uuid/旧信息，导致「编辑成功 → 同会话放置失败」。
-		// 置空后下一轮对话的预取会自动重拉最新目录（2026-09-16 真机回归发现）。
-		s.catalog = null;
-		s.catalogStats = null;
+		// 写库成功后持久化目录立即作废：服务器端模块标识与内容都可能变化，
+		// 继续沿用旧缓存提议放置会拿旧 uuid/旧信息，导致「编辑成功 → 同会话放置失败」。
+		// 清除后下一轮对话模型会先 refresh_catalog 重拉最新目录（2026-09-16 真机回归发现）。
+		await clearCatalogRecord();
 		// 模块内容已变，此前的原理图分析结论视为过期（uuid 若变化则旧键自然作废）。
 		s.analyzed.delete(proposal.cbbUuid);
 		return { ok: true };
@@ -781,7 +1177,7 @@ export async function confirmEdit(
 }
 
 export async function confirmExport(sessionId: string, token: string, uuids: Array<string>): Promise<{ ok: boolean; stats?: CatalogStatsView; fileCount?: number; cloudCount?: number; fileName?: string; failed?: Array<{ name: string; error: string }>; error?: string }> {
-	const { session: s, card } = requireCard(sessionId, token, 'export');
+	const { card } = requireCard(sessionId, token, 'export');
 	if (!Array.isArray(uuids) || !uuids.length)
 		throw new Error('未勾选任何模块');
 	if (!card.allowedUuids)
@@ -791,17 +1187,19 @@ export async function confirmExport(sessionId: string, token: string, uuids: Arr
 			throw new Error('导出清单与确认卡提案不一致，请重新发起。');
 	}
 	try {
-		// 复用卡上会话快照导出（与用户确认的内容同源，避免确认后���拉目录导致清单漂移）；
-		// 传入深拷贝，防止 pkg 内的过滤/回写污染会话状态；文件定位在导出时仍按磁盘实况执行。
-		const snapshot = s.catalog
-			? JSON.parse(JSON.stringify(s.catalog)) as CatalogJson
+		// 复用持久化目录导出（与用户确认的内容同源，避免确认后重拉目录导致清单漂移）；
+		// 传入深拷贝，防止 pkg 内的过滤/回写污染存储状态；文件定位在导出时仍按磁盘实况执行。
+		// 缓存为空时 pkg 回退为重新拉取（exportProjectPackage 内置该路径）。
+		const catalogRec = await loadCatalogRecord();
+		const snapshot = catalogRec
+			? JSON.parse(JSON.stringify(catalogRec.catalog)) as CatalogJson
 			: undefined;
 		const r = await exportProjectPackage(uuids, snapshot);
 		if (!r.ok && !r.cancelled)
 			throw new Error('导出失败');
-		const rec = s.cards.get(token);
-		if (rec && r.ok)
-			rec.status = 'done';
+		const cardRec = requireCardRecord(sessionId, token);
+		if (cardRec && r.ok)
+			cardRec.status = 'done';
 		return { ok: r.ok, stats: r.stats, fileCount: r.fileCount, cloudCount: r.cloudCount, fileName: r.fileName, failed: r.failed, error: r.cancelled ? '已取消' : undefined };
 	}
 	catch (e) {

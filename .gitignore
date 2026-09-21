@@ -3,6 +3,10 @@
 !/.vscode/settings.json
 /coverage/
 /dist/
+/build/dist/
 /node_modules/
 /.eslintcache
 debug.log
+
+# ---------- Internal project docs (local only, do not publish) ----------
+/docs/

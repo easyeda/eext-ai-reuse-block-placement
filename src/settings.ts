@@ -60,8 +60,14 @@ export const DEFAULT_PLACEMENT_SETTINGS: PlacementSettings = {
 	margin: 40,
 };
 
-function storage(): { getExtensionUserConfig?: (k: string) => string; setExtensionUserConfig?: (k: string, v: string) => void } | undefined {
-	return (edaGlobal()?.sys_Storage ?? undefined) as { getExtensionUserConfig?: (k: string) => string; setExtensionUserConfig?: (k: string, v: string) => void } | undefined;
+interface SysStorageApi {
+	/** 官方 sys_Storage 签名：get 同步返回任意值（key 不存在为 undefined）；set 返回 Promise<boolean>。 */
+	getExtensionUserConfig?: (k: string) => unknown;
+	setExtensionUserConfig?: (k: string, v: string) => Promise<boolean>;
+}
+
+function storage(): SysStorageApi | undefined {
+	return (edaGlobal()?.sys_Storage ?? undefined) as SysStorageApi | undefined;
 }
 
 function lsGet(key: string): string {
@@ -86,7 +92,9 @@ function sysGet(key: string): string {
 }
 function sysSet(key: string, val: string): void {
 	try {
-		storage()?.setExtensionUserConfig?.(key, val);
+		// 官方签名返回 Promise<boolean>：不处理会产生 unhandled rejection，显式吞掉
+		// （设置落盘尽力而为；设置保存是同步桥方法，异步失败无法同步感知）。
+		void Promise.resolve(storage()?.setExtensionUserConfig?.(key, val)).catch(() => { /* 尽力而为 */ });
 	}
 	catch { /* 独立脚本环境无 sys_Storage */ }
 }
@@ -182,6 +190,39 @@ export function savePlacementSettings(s: PlacementSettings): void {
 	});
 	lsSet(K_PLACE, text);
 	sysSet(K_PLACE, text);
+}
+
+/** Jev（TypeSafe System One 决策模型）接入设置：与主 LLM 相互独立，各用各的 Key。恒启用——未配置 Key 时工具侧温和回落，无开关。 */
+export interface JevSettings {
+	apiKey: string;
+	/** 官方默认 https://api.typesafe.ai/v1（填到 /v1 这级，与主 LLM baseUrl 同口径）。 */
+	baseUrl: string;
+	/** 默认 jev-latest（官方旗舰别名）。 */
+	model: string;
+}
+
+export const DEFAULT_JEV_BASE_URL = 'https://api.typesafe.ai/v1';
+export const DEFAULT_JEV_MODEL = 'jev-latest';
+
+const K_JEV_KEY = 'jev_api_key';
+const K_JEV_BASE = 'jev_base_url';
+const K_JEV_MODEL = 'jev_model';
+
+export function getJevSettings(): JevSettings {
+	return {
+		apiKey: lsGet(K_JEV_KEY) || sysGet(K_JEV_KEY),
+		baseUrl: lsGet(K_JEV_BASE) || sysGet(K_JEV_BASE) || DEFAULT_JEV_BASE_URL,
+		model: lsGet(K_JEV_MODEL) || sysGet(K_JEV_MODEL) || DEFAULT_JEV_MODEL,
+	};
+}
+
+export function saveJevSettings(s: JevSettings): void {
+	lsSet(K_JEV_KEY, s.apiKey || '');
+	sysSet(K_JEV_KEY, s.apiKey || '');
+	lsSet(K_JEV_BASE, (s.baseUrl || '').trim());
+	sysSet(K_JEV_BASE, (s.baseUrl || '').trim());
+	lsSet(K_JEV_MODEL, (s.model || '').trim());
+	sysSet(K_JEV_MODEL, (s.model || '').trim());
 }
 
 /** 工程目录列表（分号分隔）：本地工程索引器的扫描范围。 */

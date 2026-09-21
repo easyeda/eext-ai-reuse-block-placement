@@ -1,7 +1,7 @@
 <!doctype html>
 <!--
   复用模块 AI 对话助手（chat.html）
-  · 双模：无桥时 mock（浏览器预览）；EDA iframe 内走 eda.jlc_cbb_copilot.chatTurn
+  · 双模：无桥时 mock（浏览器预览）；EDA iframe 内走 eda.ai_reuse_block_placement.chatTurn
   · 写画布 / 写库 / 导出必须经确认卡
 -->
 <html lang="zh-CN">
@@ -102,7 +102,12 @@
   /* 首段以 AI 内容开头时（欢迎语/状态提示）给顶部留一点呼吸，用户气泡开头则贴住 header */
   .seg:first-child .col.ai:first-child, .seg:first-child .sysnote:first-child{ padding-top:12px; }
   .bubble{width:100%; padding:9px 13px; border-radius:12px; word-break:break-word;}
-  .bubble.user{background:var(--selected); color:var(--text); border:1px solid var(--line-3);}
+  /* 用户气泡可点击：收起/展开（展开态由 JS 渲染全文，收起态由 JS 只渲染首个逻辑行） */
+  .bubble.user{background:var(--selected); color:var(--text); border:1px solid var(--line-3); cursor:pointer;}
+  .bubble.user:hover{border-color:var(--blue-line);}
+  /* 用户气泡收起态：单行省略。首个逻辑行由 JS 截取，此处仅负责单行内超宽的截断显示
+     （nowrap+ellipsis，不依赖 -webkit-line-clamp，规避内核差异） */
+  .bubble.user.fold{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   .ai-body b{color:inherit; font-weight:700;}
   .caret{display:inline-block;width:7px;height:14px;background:var(--blue);
     vertical-align:-2px; margin-left:2px; animation:blink 1s steps(2) infinite;}
@@ -137,14 +142,15 @@
   .tool-line{display:flex; align-items:center; gap:7px; cursor:pointer; user-select:none;
     color:var(--text-3); font-size:12.5px; line-height:1.4; padding:3px 0; width:100%;}
   .tool-line:hover{color:var(--text-2);}
-  .tool-spin{flex:none; width:12px; height:12px; display:none; color:var(--blue);}
-  .tool-spin svg{display:block; width:12px; height:12px; overflow:visible;}
-  .tool.running .tool-spin{display:block;}
-  .tool.running .tool-spin svg{animation:tool-rotate .9s linear infinite;}
   .tool.running .tool-label{animation:tool-pulse 1.4s ease-in-out infinite;}
   .tool.running .tool-line{color:var(--text-2);}
-  @keyframes tool-rotate{to{transform:rotate(360deg);}}
   @keyframes tool-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
+  /* ── 思维链（reasoning）折叠块：默认展开跟随流出，结束后自动收起 ── */
+  .tool.reasoning{cursor:pointer;}
+  .tool.reasoning .tool-line{color:var(--text-3);}
+  .tool.reasoning .tool-label{font-style:normal;}
+  .reasoning-stream{display:none; padding:2px 0 4px 19px; color:var(--text-3); font-size:12.5px; line-height:1.55; white-space:pre-wrap; word-break:break-word;}
+  .tool.reasoning.open .reasoning-stream{display:block;}
   .tool-line .tool-label{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   /* 整轮计时组：展开显示本轮工具行，收起隐藏 */
   .tool .tool-sub{display:none; flex-direction:column; padding-left:19px;}
@@ -187,13 +193,19 @@
     white-space:pre-wrap; word-break:break-all; background:var(--panel-2); border:1px solid var(--line); border-radius:8px;
     max-height:180px; overflow-y:auto;}
   .card:not(.open) .card-bd, .card:not(.open) .card-detail{display:none;}
-  /* 卡内逐项行（Claude/Cursor 式 item 行）：勾选框 + 主信息 + 右侧行内控件 */
-  .pick-item{display:flex; align-items:center; gap:9px; padding:8px 10px; border:1px solid var(--line);
-    border-radius:10px; margin-bottom:6px; background:var(--panel-2);}
+  /* 卡内模块清单：限高内滚（滚到边缘后原生滚动链带动外层会话滚动） */
+  .pick-list{max-height:340px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--line-3) transparent;}
+  .pick-list::-webkit-scrollbar{width:8px;}
+  .pick-list::-webkit-scrollbar-thumb{background:var(--line-3); border-radius:4px;}
+  /* 卡内逐项行（Claude/Cursor 式 item 行）：紧凑单行 = 勾选框 + 名称 + 来源 + 说明（超长省略，整行悬停看全文）+ 右侧控件 */
+  .pick-item{display:flex; align-items:center; gap:9px; padding:5px 10px; border:1px solid var(--line);
+    border-radius:10px; margin-bottom:4px; background:var(--panel-2);}
   .pick-item input[type=checkbox]{flex:none;}
   .pick-item .pi-main{flex:1; min-width:0;}
   .pick-item .pi-title{font-weight:600; font-size:12.5px; display:flex; align-items:center; gap:6px; flex-wrap:wrap;}
-  .pick-item .pi-reason{color:var(--text-3); font-size:11px; display:block; margin-top:2px;}
+  .pick-item .pi-name{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .pick-item .pi-reason{color:var(--text-3); font-size:11px; font-weight:400; min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex-shrink:2;}
   .pick-item .pi-ctrls{flex:none; display:flex; gap:6px; margin-left:auto; justify-content:flex-end; flex-wrap:wrap;}
   .pick-item select, .pick-item input[type=number]{
     padding:5px 9px; border:1px solid var(--line); border-radius:7px; font-size:12.5px;
@@ -247,6 +259,9 @@
   #send:not(:disabled){background:var(--blue); color:#fff;}
   #send:not(:disabled):hover{background:var(--blue-2);}
   #send:disabled{cursor:not-allowed;}
+  /* 停止态：红色方块按钮（发送中点击 = 中止本轮） */
+  #send.stopping{background:var(--red); color:#fff;}
+  #send.stopping:hover{background:#c22c31;}
   #page-settings{overflow-y:auto; padding:18px 20px 30px; display:none;}
   #page-settings.on{display:block;}
   .sec{border:1px solid var(--line); border-radius:var(--radius); background:var(--panel);
@@ -364,6 +379,26 @@
         </div>
       </div>
       <div class="sec">
+        <div class="sec-hd">Jev模型接入</div>
+        <div class="sec-bd">
+          <div class="frow"><label>API Key</label><div class="fctl">
+            <input type="password" id="jevKey" value="" placeholder="TypeSafe 官方 Key，仅存本地（可选）">
+            <button class="btn" id="jevToggleKey" type="button">显示</button>
+          </div></div>
+          <div class="frow"><label>baseUrl</label><div class="fctl">
+            <input type="text" id="jevBase" value="" placeholder="https://api.typesafe.ai/v1">
+          </div></div>
+          <div class="frow"><label>model</label><div class="fctl">
+            <input type="text" id="jevModel" value="" placeholder="jev-latest">
+          </div></div>
+          <div class="frow"><label></label><div class="fctl">
+            <button class="btn primary" id="jevSave" type="button">保存设置</button>
+            <button class="btn" id="jevTestConn" type="button">测试连接</button>
+          </div></div>
+          <div class="opresult" id="jevResult"></div>
+        </div>
+      </div>
+      <div class="sec">
         <div class="sec-hd">库范围</div>
         <div class="sec-bd">
           <div class="env" id="envLine" hidden></div>
@@ -402,7 +437,7 @@
       <div class="sec">
         <div class="sec-hd">关于</div>
         <div class="sec-bd" style="font-size:12px; color:var(--text-2);">
-          复用模块 AI 对话助手 · jlc-cbb-copilot v0.6.0<br>
+          复用模块 AI 对话助手 · ai-reuse-block-placement v0.8.0<br>
           自然语言找模块、确认后放置、改描述、导出目录。写操作必须经确认卡。
         </div>
       </div>
@@ -442,7 +477,7 @@
   function findRealBridge() {
     const srcs = edaSources();
     for (let i = 0; i < srcs.length; i++) {
-      const b = srcs[i] && srcs[i].jlc_cbb_copilot;
+      const b = srcs[i] && srcs[i].ai_reuse_block_placement;
       if (b && typeof b.chatTurn === 'function') return b;
     }
     return null;
@@ -493,7 +528,19 @@
 
   let mockCatalog = null;
   let mockTokenSeq = 1;
+  let mockEventHandler = null;
+  let mockAborted = false;
   const mockOpenTokens = new Map();
+
+  /** mock 事件流：模拟真实 agent 的增量行为（思考 → 正文逐字 → 工具 Running→完成）。 */
+  async function mockEmitText(text, speed) {
+    for (let i = 0; i < text.length; i += speed) {
+      if (mockAborted) return false;
+      mockEventHandler?.({ type: 'text_delta', delta: text.slice(i, i + speed), round: 0 });
+      await sleep(24);
+    }
+    return !mockAborted;
+  }
 
   function mockAllModules() {
     const cat = mockCatalog || MOCK_CATALOG;
@@ -512,6 +559,8 @@
     version: '0.4.0-mock',
     getLlmSettings() { return { provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value }; },
     saveLlmSettings() { return; },
+    onAgentEvent(_sid, handler) { mockEventHandler = typeof handler === 'function' ? handler : null; },
+    abortChatTurn() { mockAborted = true; return true; },
     getLibraryScope() { return { personal: true, team: true, local: true }; },
     saveLibraryScope() { return; },
     getLocalLibraryPath() { return ''; },
@@ -522,46 +571,73 @@
     getPlacementSettings() { return { gapX: 80, gapY: 80, borderColor: '', borderWidth: null, margin: 40 }; },
     savePlacementSettings() { return; },
     async chatTurn(_sid, userText) {
-      await sleep(400);
+      await sleep(300);
       const t = String(userText || '');
+      mockAborted = false;
+      const ev = (x) => { if (!mockAborted) mockEventHandler?.(x); };
+      const runTool = async (name, argsSummary, detail, ms) => {
+        ev({ type: 'tool_start', name, argsSummary, round: 0, args: { mock: name } });
+        await sleep(ms || 500);
+        if (mockAborted) return null;
+        const event = { name, argsSummary, status: 'ok', detail };
+        ev({ type: 'tool_end', seqId: 0, event, round: 0 });
+        return event;
+      };
+      const finish = async (text, extra) => {
+        await mockEmitText(text, 3);
+        ev({ type: 'final', result: Object.assign({ assistantText: text, tools, cards, llmConfigured: true }, extra || {}) });
+        return { assistantText: text, tools, cards, llmConfigured: true };
+      };
       const tools = [];
       const cards = [];
+      if (mockAborted) return { assistantText: '（已停止）', tools, cards, llmConfigured: true, error: { kind: 'aborted', message: '用户中止', gotoSettings: false } };
       if (!mockCatalog) {
-        await sleep(500);
+        const tool = await runTool('search_modules', '浏览目录', MOCK_CATALOG.stats, 600);
+        if (!tool) return { assistantText: '（已停止）', tools, cards, llmConfigured: true, error: { kind: 'aborted', message: '用户中止', gotoSettings: false } };
+        tools.push(tool);
         mockCatalog = MOCK_CATALOG;
-        tools.push({ name: 'get_catalog', argsSummary: '会话首次拉取', status: 'ok', detail: mockCatalog.stats });
       }
       if (/导出/.test(t)) {
         const token = 'mock-export-' + mockTokenSeq++;
         mockOpenTokens.set(token, 'export');
-        cards.push({ type: 'export', token, stats: mockCatalog.stats });
-        return { assistantText: '导出前先确认统计信息（不含 apiKey）。', tools, cards, llmConfigured: true };
+        const card = { type: 'export', token, stats: mockCatalog.stats };
+        cards.push(card);
+        ev({ type: 'card', card });
+        return await finish('导出前先确认统计信息（不含 apiKey）。');
       }
       if (/(描述|名称|名字).*(改|换|修|补|写|规范)|^(改|修|补|编辑|帮).*(描述|名称|名字)/.test(t)) {
         const empty = mockAllModules().find(m => !m.description) || mockAllModules()[0];
         const token = 'mock-edit-' + mockTokenSeq++;
         mockOpenTokens.set(token, 'edit');
-        cards.push({ type: 'edit', token, libraryUuid: empty.libraryUuid, cbbUuid: empty.uuid, src: empty.src, origName: empty.name, name: empty.name, description: empty.description });
-        return { assistantText: `找到模块 **${empty.name}**（${empty.src}）。${empty.description ? '可在卡片中修改。' : '描述为空，建议按模板补写。'}`, tools, cards, llmConfigured: true };
+        const card = { type: 'edit', token, libraryUuid: empty.libraryUuid, cbbUuid: empty.uuid, src: empty.src, origName: empty.name, name: empty.name, description: empty.description };
+        cards.push(card);
+        ev({ type: 'card', card });
+        return await finish(`找到模块 **${empty.name}**（${empty.src}）。${empty.description ? '可在卡片中修改。' : '描述为空，建议按模板补写。'}`);
       }
       if (/(失败|断网|错误|401|404|429|超时|鉴权)/.test(t)) {
-        tools.push({ name: 'llm.request', argsSummary: 'anthropic', status: 'err', error: '401', detail: 'HTTP 401 authentication_error' });
-        return { assistantText: '调用模型端点失败了：**鉴权失败**——通常是 apiKey 无效或已过期。请到 设置 → 模型接入 检查 Key。', tools, cards, gotoSettings: true, llmConfigured: true, error: { kind: 'auth', message: '401', gotoSettings: true } };
+        const tool = await runTool('llm.request', 'anthropic', 'HTTP 401 authentication_error', 400);
+        if (!tool) return { assistantText: '（已停止）', tools, cards, llmConfigured: true, error: { kind: 'aborted', message: '用户中止', gotoSettings: false } };
+        tools.push(tool);
+        return await finish('调用模型端点失败了：**鉴权失败**——通常是 apiKey 无效或已过期。请到 设置 → 模型接入 检查 Key。', { gotoSettings: true, error: { kind: 'auth', message: '401', gotoSettings: true } });
       }
       if (/千兆|以太网|PHY/.test(t)) {
-        return { assistantText: '目录中没有匹配「千兆以太网 PHY」的模块。\n建议把开源广场模块复制到个人库后再刷新目录（插件不覆盖开源广场）。', tools, cards, llmConfigured: true };
+        return await finish('目录中没有匹配「千兆以太网 PHY」的模块。\n建议把开源广场模块复制到个人库后再刷新目录（插件不覆盖开源广场）。');
       }
       if (/(本地|边界|整页.*不支持|图页.*不支持|能力)/.test(t)) {
         const local = mockAllModules().find(m => m.libraryKind === 'local');
         const token = 'mock-place-' + mockTokenSeq++;
         mockOpenTokens.set(token, 'place');
-        cards.push({ type: 'place', token, filtered: [], picks: [{ uuid: local.uuid, libraryUuid: local.libraryUuid, name: local.name, src: local.src, reason: local.reason, pageSupport: false, mode: 'symbol', target: 'current' }] });
-        return { assistantText: `以本地库模块 **${local.name}** 演示：支持符号放置（带标注）与编辑，**不支持复用模块图页**（get 接口对本地模块会崩溃）。云端个人库与团队库都是全链路可用库。\n\n半离线模式需在设置里按 config.json 的 \`LIB_DIR\` 填本地库路径：\n\n\`\`\`json\n{ "type": "HALF_OFFLINE", "LIB_DIR": ["D:/LCEDA-Pro/library"] }\n\`\`\``, tools, cards, llmConfigured: true };
+        const card = { type: 'place', token, filtered: [], picks: [{ uuid: local.uuid, libraryUuid: local.libraryUuid, name: local.name, src: local.src, reason: local.reason, pageSupport: false, mode: 'symbol', target: 'current' }] };
+        cards.push(card);
+        ev({ type: 'card', card });
+        return await finish(`以本地库模块 **${local.name}** 演示：支持符号放置（带标注）与编辑，**不支持复用模块图页**（get 接口对本地模块会崩溃）。云端个人库与团队库都是全链路可用库。\n\n半离线模式需在设置里按 config.json 的 \`LIB_DIR\` 填本地库路径：\n\n\`\`\`json\n{ "type": "HALF_OFFLINE", "LIB_DIR": ["D:/LCEDA-Pro/library"] }\n\`\`\``);
       }
       if (/(刷新|重新拉).*(目录|列表)|目录.*(刷新)|^(有|列)(哪|什么)|有哪些?模块|模块列表|^目录$/.test(t)) {
         mockCatalog = MOCK_CATALOG;
-        tools.push({ name: 'get_catalog', argsSummary: 'force 刷新', status: 'ok', detail: mockCatalog.stats });
-        return { assistantText: `目录已刷新，共 ${MOCK_MODULES.length} 个模块：\n\n| 库 | 模块数 | 能力 |\n|---|---|---|\n| 个人库（云端） | ${MOCK_MODULES.filter(m => m.libraryKind === 'personal').length} | 目录 / 符号 / 图页 / 编辑 |\n| 本地库 | ${MOCK_MODULES.filter(m => m.libraryKind === 'local').length} | 目录 / 符号 / 编辑，**不支持图页** |\n\n${mockCatalog.stats.emptyDesc ? '⚠ 有 1 个模块**描述为空**，会影响匹配质量，需要我帮你补写吗？' : '要我列出某一类模块吗？'}`, tools, cards, llmConfigured: true };
+        const tool = await runTool('refresh_catalog', '全量重拉并落盘', MOCK_CATALOG.stats, 400);
+        if (!tool) return { assistantText: '（已停止）', tools, cards, llmConfigured: true, error: { kind: 'aborted', message: '用户中止', gotoSettings: false } };
+        tools.push(tool);
+        return await finish(`目录已刷新，共 ${MOCK_MODULES.length} 个模块：\n\n| 库 | 模块数 | 能力 |\n|---|---|---|\n| 个人库（云端） | ${MOCK_MODULES.filter(m => m.libraryKind === 'personal').length} | 目录 / 符号 / 图页 / 编辑 |\n| 本地库 | ${MOCK_MODULES.filter(m => m.libraryKind === 'local').length} | 目录 / 符号 / 编辑，**不支持图页** |\n\n${mockCatalog.stats.emptyDesc ? '⚠ 有 1 个模块**描述为空**，会影响匹配质量，需要我帮你补写吗？' : '要我列出某一类模块吗？'}`);
       }
       if (/(模块|放置|候选|电源|转换|最小系统|充电|滤波|串口|485|CAN)/i.test(t)) {
         let picks = mockAllModules().filter(m => /3\.3|电源|LDO|DCDC|降压|稳压/i.test(m.classification + m.name + t));
@@ -570,11 +646,13 @@
         const token = 'mock-place-' + mockTokenSeq++;
         mockOpenTokens.set(token, 'place');
         const view = picks.map((p, i) => ({ uuid: p.uuid, libraryUuid: p.libraryUuid, name: p.name, src: p.src, reason: p.reason, pageSupport: p.pageSupport, mode: p.pageSupport ? 'page' : 'symbol', target: 'current' }));
-        cards.push({ type: 'place', token, picks: view, filtered: [] });
+        const card = { type: 'place', token, picks: view, filtered: [] };
+        cards.push(card);
+        ev({ type: 'card', card });
         const lines = picks.map((p, i) => `${i + 1}. **${p.name}**（${p.src}）—— ${p.reason}`).join('\n');
-        return { assistantText: `根据「${t}」，筛出 ${picks.length} 个候选：\n${lines}\n\n请在确认卡上确认后放置，落点由插件自动排布并避开已有内容。`, tools, cards, llmConfigured: true };
+        return await finish(`根据「${t}」，筛出 ${picks.length} 个候选：\n${lines}\n\n请在确认卡上确认后放置，落点由插件自动排布并避开已有内容。`);
       }
-      return { assistantText: '我可以帮你：找模块并放置、按模板改描述、导出目录 JSON。放置位置可选当前图页、新建图页、新建板子或新建工程。试着说一个，或点下方建议。', tools, cards, llmConfigured: true };
+      return await finish('我可以帮你：找模块并放置、按模板改描述、导出目录 JSON。放置位置可选当前图页、新建图页、新建板子或新建工程。试着说一个，或点下方建议。');
     },
     async confirmPlace(_sid, token, items) {
       if (!mockOpenTokens.has(token)) throw new Error('确认卡无效或已过期，请重新发起。');
@@ -630,7 +708,7 @@
     if (!realBridge) {
       el.classList.add('show', 'warn');
       text.textContent = '预览模式 · 模拟数据';
-      el.title = '未检测到插件桥接（eda.jlc_cbb_copilot）：当前为浏览器直接预览，模块与回复均为演示数据。在嘉立创EDA中打开面板后自动接入真桥。';
+      el.title = '未检测到插件桥接（eda.ai_reuse_block_placement）：当前为浏览器直接预览，模块与回复均为演示数据。在嘉立创EDA中打开面板后自动接入真桥。';
       return;
     }
     let s = null;
@@ -680,6 +758,11 @@
     if (!line || !msgList.contains(line)) return;
     const tool = line.closest('.tool');
     if (!tool) return;
+    if (tool.classList.contains('reasoning')) {
+      tool.dataset.userToggled = '1';
+      tool.classList.toggle('open');
+      return;
+    }
     if (tool.classList.contains('work')) {
       const opening = !tool.classList.contains('open');
       tool.classList.toggle('open', opening);
@@ -688,6 +771,27 @@
       const detail = tool.querySelector('.tool-detail');
       if (detail && detail.textContent) tool.classList.toggle('open');
     }
+  });
+  /* ── 点击用户气泡：收起/展开该条消息（收起仅显第一个逻辑行，解决多行长文本占据空间）。
+     收起/展开由 JS 按原始文本重渲染（dataset.raw 存原文），不依赖 line-clamp 类内核特性；
+     单行内超出气泡宽度再由 CSS nowrap+ellipsis 截断。
+     含换行或超长（>120 字）的消息生成时默认收起，其余默认展开。 ── */
+  function renderUserBubble(b, folded) {
+    const raw = b.dataset.raw || '';
+    b.classList.toggle('fold', folded);
+    if (folded) {
+      const norm = raw.replace(/\r\n?/g, '\n');
+      const nl = norm.indexOf('\n');
+      const first = (nl >= 0 ? norm.slice(0, nl) : norm).trim();
+      b.textContent = first + ((nl >= 0 || norm.length > first.length) ? '…' : '');
+    } else {
+      b.textContent = raw;
+    }
+  }
+  msgList.addEventListener('click', e => {
+    const bubble = e.target.closest('.bubble.user');
+    if (!bubble || !msgList.contains(bubble)) return;
+    renderUserBubble(bubble, !bubble.classList.contains('fold'));
   });
   function addUserMsg(text) {
     $('#page-chat').classList.remove('empty'); /* 首条消息后隐藏空会话首屏 */
@@ -699,7 +803,13 @@
     curSeg = null; /* 新用户消息开启新分段 */
     const seg = ensureSeg();
     const c = document.createElement('div'); c.className = 'col user';
-    c.innerHTML = `<div class="bubble user">${esc(text)}</div>`;
+    const plain = String(text || '');
+    const b = document.createElement('div');
+    b.className = 'bubble user';
+    b.title = '点击收起/展开';
+    b.dataset.raw = plain;
+    c.appendChild(b);
+    renderUserBubble(b, /\n/.test(plain.trim()) || plain.length > 120);
     seg.appendChild(c); scrollBottom();
   }
   function addNote(text) {
@@ -853,12 +963,11 @@
     return b;
   }
   /* 整轮工作计时（从消息发出起算）：运行中「⟳ Working for Xs」（旋转+闪烁），
-     结束「Worked for Xs」；展开显示本轮各工具行，收起时不���示 */
+     结束「Worked for Xs」；展开显示本轮各工具行，收起时不显示 */
   function addWorkTimer() {
-    const el = document.createElement('div'); el.className = 'tool work running'; /* 默认收起 */
+    const el = document.createElement('div'); el.className = 'tool work running open';
     el.innerHTML = `
       <div class="tool-line">
-        <span class="tool-spin" aria-hidden="true"><svg viewBox="0 0 14 14" fill="none"><path d="M7 1.5A5.5 5.5 0 1 1 1.5 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
         <span class="tool-label"></span>
         <span class="tool-caret" aria-hidden="true"><svg viewBox="0 0 14 14" fill="none"><path d="M5 3.5 L9 7 L5 10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       </div>
@@ -889,15 +998,23 @@
     (parentEl || ensureSeg()).appendChild(el);
     const label = el.querySelector('.tool-label');
     const detail = el.querySelector('.tool-detail');
+    let argsText = argsSummary || '';
+    let argsJson = '';
     function fill(payload) {
       const parts = [];
-      if (argsSummary) parts.push(String(argsSummary));
-      if (payload !== undefined) parts.push(typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2));
+      if (argsText) parts.push(argsText);
+      if (argsJson) parts.push(`入参: ${argsJson}`);
+      if (payload !== undefined) parts.push(`结果: ${typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)}`);
       detail.textContent = parts.join('\n');
     }
     scrollBottom();
     if (argsSummary) detail.textContent = String(argsSummary); /* 运行中即可展开看参数 */
     return {
+      /* 模型真实入参（后端截断后的 JSON 文本），tool_start 后立即展示 */
+      setArgs(args) {
+        argsJson = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+        detail.textContent = [argsText, argsJson ? `入参: ${argsJson}` : ''].filter(Boolean).join('\n');
+      },
       done(detailData) {
         el.classList.add('ok');
         label.textContent = `${name} · completed`;
@@ -918,8 +1035,41 @@
       },
     };
   }
-  function appendGotoSettings(parent) {
-    const btn = document.createElement('button');
+  /* ── 思维链折叠块：流式期间展开跟随，完成后自动收起；点击行切换展开 ── */
+  function addReasoningBlock(parentEl) {
+    const el = document.createElement('div'); el.className = 'tool reasoning streaming open';
+    el.innerHTML = `
+      <div class="tool-line">
+        <span class="tool-label">Thinking</span>
+        <span class="tool-caret" aria-hidden="true"><svg viewBox="0 0 14 14" fill="none"><path d="M5 3.5 L9 7 L5 10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      </div>
+      <div class="reasoning-stream"></div>`;
+    (parentEl || ensureSeg()).appendChild(el);
+    const label = el.querySelector('.tool-label');
+    const stream = el.querySelector('.reasoning-stream');
+    let text = '';
+    let settleTimer = null;
+    scrollBottom();
+    return {
+      append(delta) {
+        text += String(delta || '');
+        stream.textContent = text;
+        scrollBottom();
+      },
+      /* 结束：label 定格为 Thought，稍后自动收起（用户手动操作过则维持其选择）。
+         幂等：轮次边界 / 工具开始 / 整轮结束多处触发，只生效一次。 */
+      done() {
+        if (!el.classList.contains('streaming')) return;
+        el.classList.remove('streaming');
+        label.textContent = 'Thought';
+        settleTimer = setTimeout(() => {
+          if (!el.dataset.userToggled) el.classList.remove('open');
+        }, 1200);
+      },
+      el,
+    };
+  }
+  function appendGotoSettings(parent) {    const btn = document.createElement('button');
     btn.className = 'btn link';
     btn.textContent = '去设置检查 →';
     btn.onclick = () => switchTab('settings');
@@ -929,7 +1079,7 @@
   function invalidateCards(reason) {
     liveCards.forEach(c => {
       if (!c.classList.contains('done')) {
-        c.classList.add('dead');
+        c.classList.add('dead'); c.classList.remove('open');
         const ft = c.querySelector('.card-foot');
         if (ft) ft.insertAdjacentHTML('beforeend', `<span style="color:var(--red);font-size:11.5px;margin-left:auto">⚠ ${esc(reason)}，请重新发起</span>`);
       }
@@ -959,14 +1109,24 @@
     return el;
   }
 
+  /* 清单卡公共：计数徽标（已选 M/N 实时刷新） */
+  function bindPickCount(el, checkCls) {
+    const hd = el.querySelector('.hd-status');
+    const updCount = () => {
+      const boxes = [...el.querySelectorAll(`.${checkCls}`)];
+      hd.textContent = `已选 ${boxes.filter(cb => cb.checked).length}/${boxes.length}`;
+    };
+    updCount();
+    el.addEventListener('change', e => { if (e.target.classList && e.target.classList.contains(checkCls)) updCount(); });
+  }
+
   function addPlaceCard(card) {
     const picks = card.picks || [];
     const items = picks.map((p, i) => `
-      <div class="pick-item">
+      <div class="pick-item" ${p.reason ? `title="${esc(p.reason)}"` : ''}>
         <input type="checkbox" class="pk-check" data-i="${i}" checked>
         <div class="pi-main">
-          <div class="pi-title">${esc(p.name)} <span class="pick-src">${esc(p.src)}</span></div>
-          ${p.reason ? `<span class="pi-reason">${esc(p.reason)}</span>` : ''}
+          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span>${p.reason ? `<span class="pi-reason">${esc(p.reason)}</span>` : ''}</div>
         </div>
         <div class="pi-ctrls">
           <select class="pk-mode" ${p.pageSupport ? '' : 'disabled title="本地库不支持复用模块图页（lib_Cbb.get 崩溃）"'}>
@@ -987,12 +1147,14 @@
     notes.push('自动按对齐网格排布并避开已占用区域；每次放置会向工程库写入一个 CBB 副本。');
     const el = cardShell({
       title: '放置方案确认',
-      bodyHTML: items + (picks.length > 1 ? `<div class="hint">共 ${picks.length} 项，可逐项调整形式与位置。</div>` : ''),
+      bodyHTML: `<div class="pick-list">${items}</div>`
+        + (picks.length > 1 ? `<div class="hint">共 ${picks.length} 项，可逐项调整形式与位置。</div>` : ''),
       detailText: notes.join('\n'),
       footHTML: `<button class="btn primary act-place">放置所选</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
     });
+    if (picks.length > 1) bindPickCount(el, 'pk-check');
     el.querySelector('.act-cancel').onclick = () => {
-      el.classList.add('dead');
+      el.classList.add('dead'); el.classList.remove('open');
       liveCards.splice(liveCards.indexOf(el), 1);
       try { bridge.cancelCard(SESSION_ID, card.token); } catch (e) {}
       addNote('已取消放置');
@@ -1012,7 +1174,7 @@
         });
       });
       if (!items.length) { busy = false; addNote('未勾选任何模块'); return; }
-      el.classList.add('done'); liveCards.splice(liveCards.indexOf(el), 1);
+      el.classList.add('done'); el.classList.remove('open'); liveCards.splice(liveCards.indexOf(el), 1);
       const tb = addToolBubble('place_cbb', items.length + ' 项');
       try {
         const res = await bridge.confirmPlace(SESSION_ID, card.token, items);
@@ -1032,10 +1194,32 @@
     };
   }
 
+  /* ── 模块描述编辑卡：队列步进式 ──
+     相邻到达的多张编辑提案合并为一张卡，一次只展示一个模块（第 1/N 个），
+     「写回修改」或「跳过」后自动进入下一个（每个模块仍是独立 token，后端协议不变）；
+     全部处理完后整卡折叠并汇总结果。单个提案时外观与旧行为一致。 */
+  let editQueue = null;
   function addEditCard(card) {
-    const el = cardShell({
-      title: '模块描述编辑',
-      bodyHTML: `
+    const isFirst = !editQueue;
+    if (isFirst) {
+      const el = cardShell({
+        title: '模块描述编辑',
+        bodyHTML: '',
+        footHTML: `<button class="btn primary act-apply">写回修改</button><span class="spacer"></span>`
+          + `<button class="btn link act-skip-all" type="button" style="display:none">跳过其余</button>`
+          + `<button class="btn act-skip">取消</button>`,
+      });
+      editQueue = { el, cards: [], idx: 0, applied: 0, skipped: 0 };
+      el.querySelector('.act-apply').onclick = applyEditQueueItem;
+      el.querySelector('.act-skip').onclick = skipEditQueueItem;
+      el.querySelector('.act-skip-all').onclick = skipRestEditQueue;
+    }
+    editQueue.cards.push(card);
+    if (isFirst) renderEditQueue();
+    else updateEditQueueMeta();
+  }
+  function editQueueBodyHTML(card) {
+    return `
         <div class="pick-item" style="display:block">
           <div class="pi-title">${esc(card.origName || card.name)} <span class="pick-src">${esc(card.src)}</span></div>
           ${card.analyzed ? '<span class="pi-reason" style="color:var(--blue)">已按模块自带原理图自动分析生成建议，可直接修改。</span>' : ''}
@@ -1043,31 +1227,81 @@
           <input type="text" class="em-name" value="${esc(card.name)}" style="width:100%; padding:6px 9px; border:1px solid var(--line); border-radius:7px; font:12.5px/1.5 inherit; font-family:inherit; background:var(--panel); color:var(--text); outline:none;">
           <label style="display:block; font-size:11.5px; color:var(--text-3); margin:8px 0 3px;">更新模块描述</label>
           <textarea class="em-desc" style="width:100%; min-height:84px; resize:vertical; padding:6px 9px; border:1px solid var(--line); border-radius:7px; font:12.5px/1.5 inherit; font-family:inherit; background:var(--panel); color:var(--text); outline:none;">${esc(card.description || '')}</textarea>
-        </div>`,
-      footHTML: `<button class="btn primary act-apply">写回修改</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
-    });
-    el.querySelector('.act-cancel').onclick = () => {
-      el.classList.add('dead'); liveCards.splice(liveCards.indexOf(el), 1);
-      try { bridge.cancelCard(SESSION_ID, card.token); } catch (e) {}
-      addNote('已取消编辑');
+        </div>`;
+  }
+  function renderEditQueue() {
+    const q = editQueue; if (!q) return;
+    q.el.querySelector('.card-bd').innerHTML = editQueueBodyHTML(q.cards[q.idx]);
+    updateEditQueueMeta();
+  }
+  function updateEditQueueMeta() {
+    const q = editQueue; if (!q) return;
+    const remaining = q.cards.length - q.idx;
+    q.el.querySelector('.hd-status').textContent = q.cards.length > 1 ? `第 ${q.idx + 1}/${q.cards.length} 个` : '';
+    q.el.querySelector('.act-skip').textContent = q.cards.length > 1 ? '跳过' : '取消';
+    q.el.querySelector('.act-skip-all').style.display = remaining > 1 ? '' : 'none';
+  }
+  function setEditQueueBusy(b) {
+    const q = editQueue; if (!q) return;
+    ['act-apply', 'act-skip', 'act-skip-all'].forEach(cls => { const btn = q.el.querySelector('.' + cls); if (btn) btn.disabled = b; });
+  }
+  function advanceEditQueue() {
+    const q = editQueue; if (!q) return;
+    q.idx++;
+    if (q.idx >= q.cards.length) finishEditQueue();
+    else renderEditQueue();
+  }
+  function finishEditQueue() {
+    const q = editQueue; editQueue = null;
+    const el = q.el;
+    if (el.classList.contains('dead')) return; /* 已被会话失效标记接管，不再重复收尾 */
+    if (q.cards.length > 1) el.querySelector('.hd-status').textContent = `写回 ${q.applied} · 跳过 ${q.skipped}`;
+    el.classList.add('done'); el.classList.remove('open');
+    liveCards.splice(liveCards.indexOf(el), 1);
+    if (q.cards.length > 1) {
+      streamAi(q.applied > 0
+        ? `描述修改处理完成：写回 **${q.applied}** 项${q.skipped ? `，跳过 ${q.skipped} 项` : ''}。到官方库面板刷新后即可看到。`
+        : '已跳过全部编辑，未做任何修改。', 3);
+    } else if (q.applied > 0) {
+      streamAi('已写回修改。到官方库面板刷新后即可看到。', 3);
+    }
+  }
+  async function applyEditQueueItem() {
+    const q = editQueue; if (!q || busy || q.el.classList.contains('dead')) return;
+    busy = true; setEditQueueBusy(true);
+    const card = q.cards[q.idx];
+    const payload = {
+      libraryUuid: card.libraryUuid, cbbUuid: card.cbbUuid,
+      name: q.el.querySelector('.em-name').value, description: q.el.querySelector('.em-desc').value,
     };
-    el.querySelector('.act-apply').onclick = async () => {
-      if (busy) return; busy = true;
-      el.classList.add('done'); liveCards.splice(liveCards.indexOf(el), 1);
-      const payload = {
-        libraryUuid: card.libraryUuid, cbbUuid: card.cbbUuid,
-        name: el.querySelector('.em-name').value, description: el.querySelector('.em-desc').value,
-      };
-      const tb = addToolBubble('edit_module', payload.name);
-      try {
-        const res = await bridge.confirmEdit(SESSION_ID, card.token, payload);
-        res.ok ? tb.done(res) : tb.fail(res.error || '失败', res);
-        busy = false;
-        await streamAi(res.ok ? '已写回修改。到官方库面板刷新后即可看到。' : ('写回失败：' + (res.error || '')), 3);
-      } catch (e) {
-        tb.fail(e.message || String(e)); busy = false;
-      }
-    };
+    const tb = addToolBubble('edit_module', payload.name);
+    try {
+      const res = await bridge.confirmEdit(SESSION_ID, card.token, payload);
+      res.ok ? tb.done(res) : tb.fail(res.error || '失败', res);
+      busy = false; setEditQueueBusy(false);
+      if (!res.ok) return; /* 失败留在当前模块，可重试或跳过 */
+      q.applied++;
+      advanceEditQueue();
+    } catch (e) {
+      tb.fail(e.message || String(e));
+      busy = false; setEditQueueBusy(false); /* 失败留在当前模块 */
+    }
+  }
+  function skipEditQueueItem() {
+    const q = editQueue; if (!q || busy || q.el.classList.contains('dead')) return;
+    try { bridge.cancelCard(SESSION_ID, q.cards[q.idx].token); } catch (e) {}
+    q.skipped++;
+    if (q.cards.length === 1) addNote('已取消编辑');
+    advanceEditQueue();
+  }
+  function skipRestEditQueue() {
+    const q = editQueue; if (!q || busy || q.el.classList.contains('dead')) return;
+    for (let i = q.idx; i < q.cards.length; i++) {
+      try { bridge.cancelCard(SESSION_ID, q.cards[i].token); } catch (e) {}
+    }
+    q.skipped += q.cards.length - q.idx;
+    q.idx = q.cards.length;
+    finishEditQueue();
   }
 
   function addExportCard(card) {
@@ -1077,8 +1311,7 @@
       <div class="pick-item">
         <input type="checkbox" class="ep-check" data-i="${i}" checked>
         <div class="pi-main">
-          <div class="pi-title">${esc(p.name)} <span class="pick-src">${esc(p.src)}</span></div>
-          <span class="pi-reason">${p.hasFile ? '本地 · 含工程文件' : (p.storage === 'local' ? '本地 · 路径未解析' : '云端 · 仅清单')}</span>
+          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span><span class="pi-reason">${p.hasFile ? '本地 · 含工程文件' : (p.storage === 'local' ? '本地 · 路径未解析' : '云端 · 仅清单')}</span></div>
         </div>
       </div>`).join('');
     const statParts = [];
@@ -1088,19 +1321,21 @@
     if (stats.failed) statParts.push(`${stats.failed} 库拉取失败`);
     const el = cardShell({
       title: '工程包导出确认',
-      bodyHTML: items + `<div class="hint">未勾选的模块不会写入 zip（catalog.json 同步排除）。云端模块勾选仅表示保留清单条目，工程数据在服务器。不含 apiKey。</div>`,
+      bodyHTML: `<div class="pick-list">${items}</div>`
+        + `<div class="hint">未勾选的模块不会写入 zip（catalog.json 同步排除）。云端模块勾选仅表示保留清单条目，工程数据在服务器。不含 apiKey。</div>`,
       detailText: statParts.length ? `目录统计：${statParts.join(' · ')}${stats.elapsedMs ? ` · 耗时 ${(stats.elapsedMs / 1000).toFixed(1)}s` : ''}` : undefined,
       footHTML: `<button class="btn primary act-go">导出工程包 zip</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
     });
+    if (picks.length > 1) bindPickCount(el, 'ep-check');
     ensureSeg().appendChild(el); liveCards.push(el); scrollBottom();
     el.querySelector('.act-cancel').onclick = () => {
-      el.classList.add('dead'); liveCards.splice(liveCards.indexOf(el), 1);
+      el.classList.add('dead'); el.classList.remove('open'); liveCards.splice(liveCards.indexOf(el), 1);
       try { bridge.cancelCard(SESSION_ID, card.token); } catch (e) {}
       addNote('已取消导出');
     };
     el.querySelector('.act-go').onclick = async () => {
       if (busy) return; busy = true;
-      el.classList.add('done'); liveCards.splice(liveCards.indexOf(el), 1);
+      el.classList.add('done'); el.classList.remove('open'); liveCards.splice(liveCards.indexOf(el), 1);
       const tb = addToolBubble('export_catalog', (stats.modules || 0) + ' 模块');
       try {
         const uuids = [];
@@ -1134,29 +1369,149 @@
     });
   }
 
+  /* ── 实时事件渲染：sendBtn 在发送中变为停止按钮 ──
+     事件流（onAgentEvent）驱动 UI：reasoning/text 增量、工具 Running→完成、卡片即时出现；
+     chatTurn 的 Promise resolve（final 快照）只做对账：目录失效标记与去设置入口。 */
+  let currentAi = null;      /* 本轮正文气泡（流式 append） */
+  let currentReasoning = null; /* 本轮思维链折叠块 */
+  let liveTools = [];        /* seqId → 工具行句柄 */
+  let currentWork = null;    /* 整轮计时器句柄 */
+  let stopRequested = false;
+
+  function setSendAsStop(isStop) {
+    sendBtn.classList.toggle('stopping', isStop);
+    sendBtn.title = isStop ? '停止生成' : '发送 (Enter)';
+    sendBtn.innerHTML = isStop
+      ? '<svg viewBox="0 0 24 24" fill="none"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/></svg>'
+      : '<svg viewBox="0 0 24 24" fill="none"><path d="M12 19V6M12 5l-6.5 6.5M12 5l6.5 6.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+
+  function ensureAiBubble() {
+    if (!currentAi) {
+      currentAi = addAiBubble();
+      currentAi.el.innerHTML = '';
+    }
+    return currentAi;
+  }
+
+  /* 每轮独立渲染上下文：agent 多轮调用（思考→工具→再思考）在 UI 上按轮分段，
+     轮次边界可见，不再把所有轮次拼进同一个思考块/气泡。 */
+  let currentRound = -1;
+
+  function ensureRoundContext(round) {
+    if (currentRound === round) return;
+    /* 进入新一轮 = 上一轮的思考已结束：把上一轮 Thinking 定格为 Thought */
+    if (currentReasoning) currentReasoning.done();
+    currentRound = round;
+    currentReasoning = null;
+    currentAi = null;
+    /* liveTools 不重置：后端 seqId 按整轮全局递增，前端数组必须与之一一对应 */
+  }
+
+  function handleAgentEvent(ev) {
+    if (ev.type === 'reasoning_delta') {
+      ensureRoundContext(ev.round);
+      if (!currentReasoning) currentReasoning = addReasoningBlock(workBody());
+      currentReasoning.append(ev.delta);
+      return;
+    }
+    if (ev.type === 'text_delta') {
+      ensureRoundContext(ev.round);
+      const b = ensureAiBubble();
+      b.text += ev.delta;
+      b.el.innerHTML = mdRich(b.text);
+      scrollBottom();
+      return;
+    }
+    if (ev.type === 'tool_start') {
+      ensureRoundContext(ev.round);
+      /* 模型发起工具调用 = 本轮思考结束：定格 Thinking → Thought */
+      if (currentReasoning) currentReasoning.done();
+      /* tool_start 与 tool_end 通过数组下标（seqId）对位；args = 模型真实入参 JSON */
+      const tb = addToolBubble(ev.name, ev.argsSummary || '', workBody());
+      if (ev.args !== undefined) tb.setArgs(ev.args);
+      liveTools.push(tb);
+      return;
+    }
+    if (ev.type === 'tool_end') {
+      const tb = liveTools[ev.seqId];
+      if (!tb) return;
+      const t = ev.event;
+      /* detail = 工具真实执行结果 JSON（后端已截断）；失败时展示 error + 参数 */
+      if (t.status === 'ok') tb.done(t.detail);
+      else if (t.status === 'skip') tb.skip(t.error || '已跳过');
+      else tb.fail(t.error || '失败', t.detail);
+      return;
+    }
+    if (ev.type === 'round_end') {
+      ensureRoundContext(ev.round);
+      return;
+    }
+    if (ev.type === 'card') {
+      renderCards([ev.card]);
+      return;
+    }
+    if (ev.type === 'final') {
+      /* final 快照对账：卡片失效由目录刷新检测驱动；正文/工具已实时渲染，不再重画 */
+      const res = ev.result;
+      if ((res.tools || []).some(x => x.name === 'refresh_catalog'))
+        invalidateCards('目录已更新');
+      if (res.error && res.error.kind === 'aborted') {
+        if (currentAi && !currentAi.text) { currentAi.el.innerHTML = '<i>（已停止）</i>'; }
+        addNote('已停止本轮回复');
+        return;
+      }
+      if (res.error && res.error.gotoSettings) {
+        const b = ensureAiBubble();
+        appendGotoSettings(b.el.parentElement);
+      }
+      /* 极少数端点错误时 assistantText 未经过增量（recovery 话术）：补渲染 */
+      if (res.error && !currentAi) {
+        const b = addAiBubble();
+        b.el.innerHTML = mdRich(res.assistantText || '');
+        scrollBottom();
+      }
+    }
+  }
+
+  function workBody() { return currentWork ? currentWork.body : null; }
+
   async function handleUser(text) {
     const t = String(text || '').trim();
     if (!t || busy) return;
     busy = true;
+    stopRequested = false;
     syncSendState();
+    setSendAsStop(true);
     addUserMsg(t);
     markCardsRisk();
-    const work = addWorkTimer(); /* 整轮计时：从消息发出起算 */
+    currentWork = addWorkTimer();
+    currentAi = null; currentReasoning = null; liveTools = []; currentRound = -1;
     try {
-      const res = await bridge.chatTurn(SESSION_ID, t);
-      if ((res.tools || []).some(x => x.name === 'get_catalog' && /force|刷新/.test(x.argsSummary || '')))
-        invalidateCards('目录已更新');
-      renderTools(res.tools, work.body);
-      const b = await streamAi(res.assistantText || '', 3);
-      if (res.gotoSettings || (res.error && res.error.gotoSettings))
-        appendGotoSettings(b.el.parentElement);
-      renderCards(res.cards);
+      if (typeof bridge.onAgentEvent === 'function') {
+        bridge.onAgentEvent(SESSION_ID, handleAgentEvent);
+        await bridge.chatTurn(SESSION_ID, t);
+      } else {
+        /* 旧桥（无事件通道）：退回整批渲染 */
+        const res = await bridge.chatTurn(SESSION_ID, t);
+        if ((res.tools || []).some(x => x.name === 'refresh_catalog'))
+          invalidateCards('目录已更新');
+        renderTools(res.tools, work.body);
+        await streamAi(res.assistantText || '', 3);
+        if (res.gotoSettings || (res.error && res.error.gotoSettings))
+          appendGotoSettings(document.querySelector('.col.ai:last-child') || work.body);
+        renderCards(res.cards);
+      }
     } catch (e) {
       addNote('会话出现异常：' + (e.message || e));
     }
+    if (currentReasoning) currentReasoning.done();
     busy = false;
+    stopRequested = false;
+    setSendAsStop(false);
     syncSendState();
-    work.done();
+    currentWork.done();
+    currentAi = null; currentReasoning = null; liveTools = []; currentRound = -1;
   }
 
   function switchTab(name) {
@@ -1172,10 +1527,13 @@
 
   const CHIP_PROMPTS = ['现在有哪些模块？', '找一个电源模块并放置', '帮我把模块描述写规范', '导出复用模块工程和索引json'];
   CHIP_PROMPTS.forEach(c => { /* 空会话首屏（#chips，居中换行）与对话中建议条（#chipsBar，横滑）共用同一组选项 */
-    const b = document.createElement('div'); b.className = 'chip'; b.textContent = c;
-    b.onclick = () => handleUser(c);
-    $('#chips').appendChild(b);
-    $('#chipsBar').appendChild(b.cloneNode(true));
+    /* 注意：cloneNode 不复制事件监听器，两处必须各自绑定 onclick（此前 chipsBar 的克隆节点不可点击） */
+    const b1 = document.createElement('div'); b1.className = 'chip'; b1.textContent = c;
+    b1.onclick = () => handleUser(c);
+    $('#chips').appendChild(b1);
+    const b2 = document.createElement('div'); b2.className = 'chip'; b2.textContent = c;
+    b2.onclick = () => handleUser(c);
+    $('#chipsBar').appendChild(b2);
   });
   /* 建议条滚轮横滑：滚轮增量优先横向滚动本栏（始终精确到 0 / max，不会截断），
      超出部分转交上方消息区，避免边缘死区与对话流误滚 */
@@ -1200,7 +1558,7 @@
     input.style.height = Math.min(input.scrollHeight, 132) + 'px';
   }
   function syncSendState() {
-    sendBtn.disabled = busy || !input.value.trim();
+    sendBtn.disabled = busy ? stopRequested : !input.value.trim();
   }
   input.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -1209,13 +1567,62 @@
     }
   });
   input.addEventListener('input', () => { autosize(); syncSendState(); });
-  sendBtn.onclick = () => { if (!sendBtn.disabled) { handleUser(input.value); input.value = ''; autosize(); syncSendState(); } };
+  sendBtn.onclick = () => {
+    if (busy) {
+      /* 发送中 = 停止按钮：请求扩展中止本轮（旧桥无此能力则忽略） */
+      if (typeof bridge.abortChatTurn === 'function' && !stopRequested) {
+        stopRequested = true;
+        sendBtn.disabled = true;
+        try { bridge.abortChatTurn(SESSION_ID); } catch (e) {}
+      }
+      return;
+    }
+    if (!sendBtn.disabled) { handleUser(input.value); input.value = ''; autosize(); syncSendState(); }
+  };
   syncSendState();
 
   $('#toggleKey').onclick = () => {
     const k = $('#setKey');
     k.type = k.type === 'password' ? 'text' : 'password';
     $('#toggleKey').textContent = k.type === 'password' ? '显示' : '隐藏';
+  };
+  $('#jevToggleKey').onclick = () => {
+    const k = $('#jevKey');
+    k.type = k.type === 'password' ? 'text' : 'password';
+    $('#jevToggleKey').textContent = k.type === 'password' ? '显示' : '隐藏';
+  };
+  function readJevForm() {
+    return { apiKey: $('#jevKey').value, baseUrl: $('#jevBase').value, model: $('#jevModel').value };
+  }
+  $('#jevSave').onclick = () => {
+    const r = $('#jevResult');
+    try {
+      if (typeof bridge.saveJevSettings !== 'function') {
+        r.className = 'opresult err'; r.textContent = '❌ 桥接未包含 saveJevSettings，请更新扩展并重开面板。';
+        return;
+      }
+      bridge.saveJevSettings(readJevForm());
+      r.className = 'opresult ok'; r.textContent = '✅ Jev 设置已保存（双写）。';
+    } catch (e) {
+      r.className = 'opresult err'; r.textContent = '保存失败：' + e.message;
+    }
+  };
+  $('#jevTestConn').onclick = async () => {
+    const r = $('#jevResult'); r.className = '';
+    const btn = $('#jevTestConn'); btn.disabled = true; btn.textContent = '测试中…';
+    try {
+      if (typeof bridge.testJevConnection !== 'function') {
+        r.className = 'opresult err'; r.textContent = '❌ 桥接未包含 testJevConnection，请更新扩展并重开面板。';
+        return;
+      }
+      const res = await bridge.testJevConnection();
+      r.className = res.ok ? 'opresult ok' : 'opresult err';
+      r.textContent = res.ok ? `✅ 连接成功：${res.model} · ${res.latencyMs}ms` : `❌ ${res.error}`;
+    } catch (e) {
+      r.className = 'opresult err'; r.textContent = '❌ ' + e.message;
+    } finally {
+      btn.disabled = false; btn.textContent = '测试连接';
+    }
   };
   function loadSettingsIntoForm() {
     try {
@@ -1225,6 +1632,14 @@
         $('#setBase').value = s.baseUrl || '';
         $('#setKey').value = s.apiKey || '';
         $('#setModel').value = s.model || '';
+      }
+    } catch (e) {}
+    try {
+      const js = typeof bridge.getJevSettings === 'function' ? bridge.getJevSettings() : null;
+      if (js) {
+        $('#jevKey').value = js.apiKey || '';
+        $('#jevBase').value = js.baseUrl || '';
+        $('#jevModel').value = js.model || '';
       }
     } catch (e) {}
     try {

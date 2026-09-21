@@ -15,7 +15,7 @@ export function pageSupportOf(libraryKind: string): boolean {
 }
 
 export const CATALOG_FORMAT_VERSION = '0.2';
-export const CATALOG_GENERATOR = 'jlc-cbb-copilot';
+export const CATALOG_GENERATOR = 'ai-reuse-block-placement';
 
 export type LibraryKind = 'personal' | 'team' | 'local';
 export type LibraryScope = Record<LibraryKind, boolean>;
@@ -225,7 +225,7 @@ async function fetchLibraryModules(uuid: string): Promise<Array<CatalogModule>> 
 				uuid: mUuid,
 				name: String(row.name ?? ''),
 				description: String(row.description ?? ''),
-				// storage 在 fetchCatalog 中按库类型���确标记；此处先给占位默认
+				// storage 在 fetchCatalog 中按库类型正确标记；此处先给占位默认
 				storage: 'cloud',
 				classification: Array.isArray(row.classification) ? row.classification.map(String) : undefined,
 				updateTimestamp: typeof row.updateTimestamp === 'number' ? row.updateTimestamp : undefined,
