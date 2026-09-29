@@ -1,3 +1,9 @@
 {
-	"Open CBB Copilot...": "Open CBB Copilot..."
+	"Open CBB Copilot...": "Open CBB Copilot...",
+	"AI Reuse Block Placement": "AI Reuse Block Placement",
+	"Open AI Reuse Block Placement...": "Open AI Reuse Block Placement...",
+	"Reuse Block Placement": "Reuse Block Placement",
+	"Reuse Block Placement Copilot": "Reuse Block Placement Copilot",
+	"Reuse Block Placement Copilot is a tool that helps you find and place reuse blocks in your schematic design.": "Reuse Block Placement Copilot is a tool that helps you find and place reuse blocks in your schematic design.",
+	"Reuse Block Placement Copilot is a tool that helps you find and place reuse blocks in your schematic design. You can use natural language to search for reuse blocks, confirm the selection, place them in your design, modify their descriptions, and export the directory.": "Reuse Block Placement Copilot is a tool that helps you find and place reuse blocks in your schematic design. You can use natural language to search for reuse blocks, confirm the selection, place them in your design, modify their descriptions, and export the directory."
 }

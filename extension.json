@@ -1,10 +1,10 @@
 {
 	"name": "ai-reuse-block-placement",
 	"uuid": "f3a9c2d84e6b47019a5d8c21e4b7f306",
-	"displayName": "复用模块智能助手",
+	"displayName": "复用模块AI助手",
 	"description": "嘉立创EDA专业版复用模块（CBB）对话助手。自然语言找模块、确认后放置、改描述、导出目录。",
 	"version": "0.8.0",
-	"publisher": "",
+	"publisher": "EasyEDA",
 	"engines": {
 		"eda": "^3.0.0"
 	},

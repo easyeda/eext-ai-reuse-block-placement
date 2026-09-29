@@ -1,3 +1,9 @@
 {
-	"Open CBB Copilot...": "打开复用模块智能助手..."
+	"Open CBB Copilot...": "打开复用模块AI助手...",
+	"AI Reuse Block Placement": "复用模块AI助手",
+	"Open AI Reuse Block Placement...": "打开复用模块AI助手...",
+	"Reuse Block Placement": "复用模块放置",
+	"Reuse Block Placement Copilot": "复用模块放置助手",
+	"Reuse Block Placement Copilot is a tool that helps you find and place reuse blocks in your schematic design.": "复用模块放置助手是一个帮助您在原理图设计中查找和放置复用模块的工具。",
+	"Reuse Block Placement Copilot is a tool that helps you find and place reuse blocks in your schematic design. You can use natural language to search for reuse blocks, confirm the selection, place them in your design, modify their descriptions, and export the directory.": "复用模块放置助手是一个帮助您在原理图设计中查找和放置复用模块的工具。您可以使用自然语言搜索复用模块，确认选择后放置它们到设计中，修改它们的描述，并导出目录。"
 }
