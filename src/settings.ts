@@ -2,6 +2,7 @@
  * 设置持久化：localStorage 优先、sys_Storage 兜底（双写）。
  * localStorage 在 EDA 主进程不可用（iframe 内才有），读写都 try/catch 双通道。
  */
+import { DEFAULT_STYLE_PROMPT, STYLE_PRESET_RELAXED, STYLE_PRESET_RIGOROUS } from './agent/tools';
 import { edaGlobal } from './host';
 
 export type LlmProvider = 'openai-chat' | 'openai-responses' | 'anthropic';
@@ -30,13 +31,10 @@ const K_MODEL = 'llm_model';
 const K_SCOPE = 'library_scope';
 const K_LOCAL_PATH = 'local_library_path';
 const K_PLACE = 'placement_settings';
-const K_PROJECT_DIRS = 'project_dirs';
+const K_STYLE = 'style_prompt';
 
 /** 半离线模式下路径发现 API 全部失效时的本地库兜底路径。 */
 export const DEFAULT_LOCAL_LIBRARY_PATH = 'C:\\Users\\JLC\\Documents\\LCEDA-Pro\\libraries';
-
-/** 本地工程目录默认路径（EasyEDA Pro 约定位置；在线版 getProjectsPaths 不可用时用此兜底）。 */
-export const DEFAULT_PROJECT_DIRS = 'C:\\Users\\JLC\\Documents\\LCEDA-Pro\\projects;C:\\Users\\JLC\\Documents\\LCEDA-Pro\\libraries';
 
 /** 放置排布设置：模块间距与标注框样式（确认卡不再逐次调整，全局生效）。 */
 export interface PlacementSettings {
@@ -225,20 +223,22 @@ export function saveJevSettings(s: JevSettings): void {
 	sysSet(K_JEV_MODEL, (s.model || '').trim());
 }
 
-/** 工程目录列表（分号分隔）：本地工程索引器的扫描范围。 */
-export function getProjectDirs(): string {
-	return lsGet(K_PROJECT_DIRS) || sysGet(K_PROJECT_DIRS) || DEFAULT_PROJECT_DIRS;
+/** 用户自定义的风格与限制。未保存或保存为空时返回内置默认。 */
+export function getStylePrompt(): string {
+	const raw = lsGet(K_STYLE) || sysGet(K_STYLE);
+	return raw.trim() || DEFAULT_STYLE_PROMPT;
 }
 
-export function saveProjectDirs(dirs: string): void {
-	const v = (dirs || '').trim() || DEFAULT_PROJECT_DIRS;
-	lsSet(K_PROJECT_DIRS, v);
-	sysSet(K_PROJECT_DIRS, v);
+export function getDefaultStylePrompt(): string {
+	return DEFAULT_STYLE_PROMPT;
 }
 
-export function parseProjectDirs(dirs: string): Array<string> {
-	return (dirs || '')
-		.split(/[;\n]/)
-		.map(d => d.trim())
-		.filter(Boolean);
+export function getStylePresets(): { rigorous: string; relaxed: string } {
+	return { rigorous: STYLE_PRESET_RIGOROUS, relaxed: STYLE_PRESET_RELAXED };
+}
+
+export function saveStylePrompt(text: string): void {
+	const v = (text || '').trim();
+	lsSet(K_STYLE, v);
+	sysSet(K_STYLE, v);
 }

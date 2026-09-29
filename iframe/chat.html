@@ -286,6 +286,10 @@
   .pitem input[type=text]{width:96px;}
   .punit{font-size:11px; color:var(--meta);}
   .pnote{font-size:11px; color:var(--meta); margin-top:2px;}
+  #setStyle{width:100%; min-height:220px; resize:vertical; box-sizing:border-box; margin:8px 0 10px; padding:8px 10px;
+    border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text);
+    font:12.5px/1.55 Consolas,Menlo,monospace; outline:none;}
+  #setStyle:focus{border-color:var(--blue);}
   .note{font-size:11.5px; color:var(--text-3); margin:2px 0 10px; padding-left:98px;}
   .note.flush{padding-left:0;}
   /* 库范围只读展示行：来源名 + 可用性徽标（三源直测结果，用户不可更改） */
@@ -424,14 +428,15 @@
         </div>
       </div>
       <div class="sec">
-        <div class="sec-hd">本地库复用</div>
+        <div class="sec-hd">系统提示词</div>
         <div class="sec-bd">
-          <div class="prow">
-            <button class="btn" id="btnExportPkg">导出工程包 zip</button>
-            <button class="btn" id="btnImportPkg">导入工程包 zip</button>
-          </div>
-          <div class="pnote">本地库复用模块的全部导出和导入；云端模块数据在服务器，不参与打包，导入后模块未出现请重启客户端。</div>
-          <pre class="diag" id="pkgOut" style="display:none"></pre>
+          <textarea id="setStyle" spellcheck="false"></textarea>
+          <div class="frow"><label></label><div class="fctl">
+            <button class="btn" id="presetRigorous" type="button">严谨风格</button>
+            <button class="btn" id="presetRelaxed" type="button">宽松风格</button>
+            <button class="btn primary" id="saveStyle" type="button">保存</button>
+          </div></div>
+          <div class="opresult" id="styleResult"></div>
         </div>
       </div>
       <div class="sec">
@@ -565,11 +570,22 @@
     saveLibraryScope() { return; },
     getLocalLibraryPath() { return ''; },
     saveLocalLibraryPath() { return; },
-    getProjectDirs() { return ''; },
-    saveProjectDirs() { return; },
-    async importProjectPackage() { return { ok: true, imported: [], failed: [], targetDir: '', note: '浏览器 mock 未写入磁盘。' }; },
     getPlacementSettings() { return { gapX: 80, gapY: 80, borderColor: '', borderWidth: null, margin: 40 }; },
     savePlacementSettings() { return; },
+    getStylePrompt() {
+      return $('#setStyle').dataset.saved === '1'
+        ? ($('#setStyle').value.trim() || this.getDefaultStylePrompt())
+        : this.getDefaultStylePrompt();
+    },
+    getDefaultStylePrompt() { return this.getStylePresets().rigorous; },
+    getStylePresets() {
+      const reply = '回复用中文。可用 Markdown 排版：**加粗**模块名与关键参数、行内代码、列表、表格、围栏代码块。不要输出图片、HTML 标签和表情字符。不要在回复中写出 apiKey 或完整密钥。\n\n改名称或描述时，直接根据已读取的原理图给出建议，不要先反问用户索要信息。';
+      return {
+        rigorous: '需求不够具体时，先指导用户把描述说准确，再去查找或放置模块。例如用户只说「找一个电源模块并放置」：不要开始查找，也不要列出目录里的全部或大量模块，更不要直接给出放置方案。请用户补充能区分模块的条件（电压、电流、接口、具体功能），或直接指定模块名称/型号。条件说清楚或点名模块之后再查找；用户同时要求放置时才给出放置确认。只有用户明确要浏览目录（如「有哪些模块」）时才查找，并按库概括，不要把整库逐条倒出来。\n\n' + reply,
+        relaxed: '需求比较宽时不要反复追问，直接查找并推荐 1～3 个较匹配的模块，按匹配程度从高到低说明。例如用户说「找一个电源模块并放置」，先给出少量候选；用户同时要求放置时，再给出放置确认。不要把目录里的模块逐条全部列出来。\n\n' + reply,
+      };
+    },
+    saveStylePrompt() { $('#setStyle').dataset.saved = '1'; },
     async chatTurn(_sid, userText) {
       await sleep(300);
       const t = String(userText || '');
@@ -670,10 +686,10 @@
       if (!mockOpenTokens.has(token)) throw new Error('确认卡无效或已过期，请重新发起。');
       mockOpenTokens.delete(token);
       await sleep(700);
-      return { ok: true, fileCount: 0, cloudCount: (uuids || []).length, fileName: 'mock.zip', failed: [], stats: MOCK_CATALOG.stats };
+      return { ok: true, fileName: 'cbb-catalog-mock.json', stats: MOCK_CATALOG.stats };
     },
     cancelCard(_sid, token) { mockOpenTokens.delete(token); },
-    resetChatSession() { mockCatalog = null; mockOpenTokens.clear(); },
+    resetChatSession() { mockOpenTokens.clear(); },
     async selfCheck() {
       await sleep(400);
       return '⚠ 当前为浏览器 mock，未注入 eda。\n在嘉立创EDA中打开本面板后走真桥自检。';
@@ -1144,7 +1160,6 @@
     const notes = [];
     if ((card.filtered || []).length) notes.push(`已过滤无效候选：${card.filtered.join('、')}`);
     if (card.notFoundHint) notes.push(card.notFoundHint);
-    notes.push('自动按对齐网格排布并避开已占用区域；每次放置会向工程库写入一个 CBB 副本。');
     const el = cardShell({
       title: '放置方案确认',
       bodyHTML: `<div class="pick-list">${items}</div>`
@@ -1311,7 +1326,7 @@
       <div class="pick-item">
         <input type="checkbox" class="ep-check" data-i="${i}" checked>
         <div class="pi-main">
-          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span><span class="pi-reason">${p.hasFile ? '本地 · 含工程文件' : (p.storage === 'local' ? '本地 · 路径未解析' : '云端 · 仅清单')}</span></div>
+          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span><span class="pi-reason">${p.storage === 'local' ? '本地库' : '云端库'}</span></div>
         </div>
       </div>`).join('');
     const statParts = [];
@@ -1320,11 +1335,11 @@
     if (stats.emptyDesc) statParts.push(`${stats.emptyDesc} 描述为空`);
     if (stats.failed) statParts.push(`${stats.failed} 库拉取失败`);
     const el = cardShell({
-      title: '工程包导出确认',
+      title: '目录 JSON 导出确认',
       bodyHTML: `<div class="pick-list">${items}</div>`
-        + `<div class="hint">未勾选的模块不会写入 zip（catalog.json 同步排除）。云端模块勾选仅表示保留清单条目，工程数据在服务器。不含 apiKey。</div>`,
+        + `<div class="hint">未勾选的模块不会写入 JSON。只导出目录条目，不含工程文件，也不含 apiKey。</div>`,
       detailText: statParts.length ? `目录统计：${statParts.join(' · ')}${stats.elapsedMs ? ` · 耗时 ${(stats.elapsedMs / 1000).toFixed(1)}s` : ''}` : undefined,
-      footHTML: `<button class="btn primary act-go">导出工程包 zip</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
+      footHTML: `<button class="btn primary act-go">导出 JSON</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
     });
     if (picks.length > 1) bindPickCount(el, 'ep-check');
     ensureSeg().appendChild(el); liveCards.push(el); scrollBottom();
@@ -1344,7 +1359,7 @@
         const res = await bridge.confirmExport(SESSION_ID, card.token, uuids);
         if (res.ok) {
           tb.done(res); busy = false;
-          await streamAi(`工程包 **${res.fileName}** 已通过另存对话框写出：打包本地模块工程文件 **${res.fileCount ?? 0}** 个，云端模块 ${res.cloudCount ?? 0} 个仅清单留痕（zip 内含 catalog.json）。`, 3);
+          await streamAi(`目录 JSON **${res.fileName}** 已通过另存对话框写出，只含勾选模块的目录条目。`, 3);
         }
         else { tb.skip(res.error || '已取消'); busy = false; if (res.error !== '已取消') await streamAi('导出失败：' + res.error, 3); }
       } catch (e) {
@@ -1525,7 +1540,7 @@
   $('#settingsBtn').onclick = () => switchTab(
     $('#page-settings').classList.contains('on') ? 'chat' : 'settings');
 
-  const CHIP_PROMPTS = ['现在有哪些模块？', '找一个电源模块并放置', '帮我把模块描述写规范', '导出复用模块工程和索引json'];
+  const CHIP_PROMPTS = ['现在有哪些模块？', '找一个电源模块并放置', '帮我把模块描述写规范', '导出复用模块索引 JSON'];
   CHIP_PROMPTS.forEach(c => { /* 空会话首屏（#chips，居中换行）与对话中建议条（#chipsBar，横滑）共用同一组选项 */
     /* 注意：cloneNode 不复制事件监听器，两处必须各自绑定 onclick（此前 chipsBar 的克隆节点不可点击） */
     const b1 = document.createElement('div'); b1.className = 'chip'; b1.textContent = c;
@@ -1652,8 +1667,36 @@
         $('#setMargin').value = (ps.margin === 0 || ps.margin) ? ps.margin : 40;
       }
     } catch (e) {}
+    try {
+      if (typeof bridge.getStylePrompt === 'function')
+        $('#setStyle').value = bridge.getStylePrompt() || '';
+    } catch (e) {}
   }
   loadSettingsIntoForm();
+
+  $('#saveStyle').onclick = () => {
+    const r = $('#styleResult');
+    try {
+      if (typeof bridge.saveStylePrompt !== 'function') {
+        r.className = 'opresult err'; r.textContent = '桥接未包含风格设置，请更新扩展并重开面板。';
+        return;
+      }
+      bridge.saveStylePrompt($('#setStyle').value);
+      if (!$('#setStyle').value.trim() && typeof bridge.getStylePrompt === 'function')
+        $('#setStyle').value = bridge.getStylePrompt();
+      r.className = 'opresult ok'; r.textContent = '已保存，下一条消息生效。';
+    } catch (e) {
+      r.className = 'opresult err'; r.textContent = '保存失败：' + e.message;
+    }
+  };
+  function fillStylePreset(key, label) {
+    const presets = typeof bridge.getStylePresets === 'function' ? bridge.getStylePresets() : null;
+    const text = presets && presets[key] ? presets[key] : (typeof bridge.getDefaultStylePrompt === 'function' ? bridge.getDefaultStylePrompt() : '');
+    $('#setStyle').value = text;
+    const r = $('#styleResult'); r.className = ''; r.textContent = '已填入' + label + '，点「保存」后生效。';
+  }
+  $('#presetRigorous').onclick = () => fillStylePreset('rigorous', '严谨风格');
+  $('#presetRelaxed').onclick = () => fillStylePreset('relaxed', '宽松风格');
 
   /* ── 客户端模式检测（初始时）：三源直测结果驱动库范围只读展示 ── */
   const MODE_LABELS = { online: '在线版', 'half-offline': '半离线版', offline: '全离线版', unknown: '模式未判定' };
@@ -1727,26 +1770,13 @@
     }
     btn.disabled = false; btn.textContent = '测试连接';
   };
-  const pkgOut = () => { const o = $('#pkgOut'); o.style.display = 'block'; return o; };
-  $('#btnImportPkg').onclick = async () => {
-    const out = pkgOut(); out.textContent = '请选择工程包 zip…';
-    try {
-      const r = await bridge.importProjectPackage();
-      if (r && r.note === '未选择文件') { out.textContent = '已取消导入。'; return; }
-      const lines = [`目标目录：${r.targetDir}`, `导入成功 ${r.imported.length} 个：${r.imported.join('、') || '（无）'}`];
-      if (r.failed && r.failed.length) lines.push(`失败 ${r.failed.length} 项：` + r.failed.map(f => `\n  · ${f.file}：${f.error}`).join(''));
-      if (r.error) lines.push(`错误：${r.error}`);
-      if (r.note) lines.push(r.note);
-      out.textContent = (r.ok ? '✅ ' : '⚠ ') + lines.join('\n');
-    } catch (e) { out.textContent = '❌ 导入失败：' + (e.message || String(e)); }
-  };
   /* ── 会话标签页：名称默认「复用模块助手」，首条用户消息后更名；× 关闭 = 新会话 ── */
   const TAB_DEFAULT_TITLE = '复用模块助手';
   const chatTabLabel = $('#chatTabLabel');
   let chatTabNamed = false;
   const setChatTabTitle = (t) => { chatTabLabel.textContent = t; $('#chatTab').title = t; };
   function resetChat() {
-    if (!confirm('清空当前对话与目录快照？（设置不受影响）')) return;
+    if (!confirm('清空当前对话，开始新会话？（目录与设置不受影响）')) return;
     try { bridge.resetChatSession(SESSION_ID); } catch (e) {}
     msgList.innerHTML = ''; liveCards.length = 0; curSeg = null;
     chatTabNamed = false; setChatTabTitle(TAB_DEFAULT_TITLE);

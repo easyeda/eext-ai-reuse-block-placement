@@ -3,7 +3,7 @@
  */
 import type { LlmSettings } from '../settings';
 import type { LlmRequest } from './http';
-import { AGENT_SYSTEM_PROMPT, toolsAnthropic, toolsOpenAiChat, toolsOpenAiResponses } from './tools';
+import { composeSystemPrompt, toolsAnthropic, toolsOpenAiChat, toolsOpenAiResponses } from './tools';
 
 export interface ParsedToolCall {
 	id: string;
@@ -43,9 +43,9 @@ function anthropicHeaders(settings: LlmSettings): Record<string, string> {
 	return { 'Content-Type': 'application/json', 'x-api-key': settings.apiKey.trim(), 'anthropic-version': '2023-06-01' };
 }
 
-function toOpenAiChatMessages(systemExtra: string, history: Array<HistoryTurn>): Array<Record<string, unknown>> {
+function toOpenAiChatMessages(systemPrompt: string, history: Array<HistoryTurn>): Array<Record<string, unknown>> {
 	const msgs: Array<Record<string, unknown>> = [
-		{ role: 'system', content: `${AGENT_SYSTEM_PROMPT}\n${systemExtra}`.trim() },
+		{ role: 'system', content: systemPrompt },
 	];
 	for (const t of history) {
 		if (t.role === 'user') {
@@ -126,8 +126,10 @@ export function buildAgentRequest(
 	settings: LlmSettings,
 	systemExtra: string,
 	history: Array<HistoryTurn>,
+	stylePrompt: string,
 ): LlmRequest {
 	const base = settings.baseUrl.trim().replace(/\/+$/, '');
+	const systemPrompt = `${composeSystemPrompt(stylePrompt)}\n${systemExtra}`.trim();
 	if (settings.provider === 'anthropic') {
 		const url = anthropicEndpoint(base);
 		// Anthropic 思考模式无条件开启：thinking 块与 temperature 互斥，须去掉 temperature；
@@ -137,7 +139,7 @@ export function buildAgentRequest(
 			max_tokens: 8192,
 			stream: true,
 			thinking: { type: 'enabled', budget_tokens: 4096 },
-			system: `${AGENT_SYSTEM_PROMPT}\n${systemExtra}`.trim(),
+			system: systemPrompt,
 			messages: toAnthropicMessages(history),
 			tools: toolsAnthropic(),
 		};
@@ -149,7 +151,7 @@ export function buildAgentRequest(
 			model: settings.model.trim(),
 			stream: true,
 			reasoning: { effort: 'medium', summary: 'auto' },
-			instructions: `${AGENT_SYSTEM_PROMPT}\n${systemExtra}`.trim(),
+			instructions: systemPrompt,
 			input: toResponsesInput(history),
 			tools: toolsOpenAiResponses(),
 		};
@@ -163,7 +165,7 @@ export function buildAgentRequest(
 			model: settings.model.trim(),
 			temperature: 0,
 			stream: true,
-			messages: toOpenAiChatMessages(systemExtra, history),
+			messages: toOpenAiChatMessages(systemPrompt, history),
 			tools: toolsOpenAiChat(),
 		}),
 		headers: openaiHeaders(settings),

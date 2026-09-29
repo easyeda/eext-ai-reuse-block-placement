@@ -10,8 +10,7 @@ import { testJevConnection } from './agent/jev';
 import { cancelCard, chatTurn, confirmEdit, confirmExport, confirmPlace, resetChatSession, testLlmConnection } from './agent/loop';
 import { detectClientEnv, runSelfCheck } from './env';
 import { edaGlobal } from './host';
-import { importProjectPackage } from './pkg';
-import { getJevSettings, getLibraryScope, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getProjectDirs, saveJevSettings, saveLibraryScope, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveProjectDirs } from './settings';
+import { getDefaultStylePrompt, getJevSettings, getLibraryScope, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getStylePresets, getStylePrompt, saveJevSettings, saveLibraryScope, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveStylePrompt } from './settings';
 
 export const VERSION = extensionConfig.version;
 
@@ -26,11 +25,13 @@ export interface CbbCopilotBridge {
 	saveLibraryScope: (scope: Record<string, boolean>) => void;
 	getLocalLibraryPath: () => string;
 	saveLocalLibraryPath: (path: string) => void;
-	getProjectDirs: () => string;
-	saveProjectDirs: (dirs: string) => void;
-	importProjectPackage: () => Promise<{ ok: boolean; imported: Array<string>; failed: Array<{ file: string; error: string }>; targetDir: string; note?: string; error?: string }>;
 	getPlacementSettings: () => PlacementSettings;
 	savePlacementSettings: (s: PlacementSettings) => void;
+	/** 用户自定义的风格与限制（附在固定工作流程之后）。 */
+	getStylePrompt: () => string;
+	getDefaultStylePrompt: () => string;
+	getStylePresets: () => { rigorous: string; relaxed: string };
+	saveStylePrompt: (text: string) => void;
 	/** 注册 Agent 事件监听（每次 chatTurn 实时推送 reasoning/text delta、工具状态、卡片）。重复注册覆盖旧监听。 */
 	onAgentEvent: (sessionId: string, handler: (ev: AgentEvent) => void) => void;
 	/** 中止进行中的 chatTurn（按钮置为停止时的调用）。返回是否有进行中的轮次被中止。 */
@@ -38,7 +39,7 @@ export interface CbbCopilotBridge {
 	chatTurn: (sessionId: string, userText: string) => Promise<ChatTurnResult>;
 	confirmPlace: (sessionId: string, token: string, items: Array<PlaceCbbItem>, grid?: { dx: number; dy: number }) => Promise<{ results: Array<{ cbbUuid: string; name: string; ok: boolean; error?: string; pageName?: string; fallbackFromSymbol?: boolean }> }>;
 	confirmEdit: (sessionId: string, token: string, editable: { name: string; description: string }) => Promise<{ ok: boolean; error?: string }>;
-	confirmExport: (sessionId: string, token: string, uuids: Array<string>) => Promise<{ ok: boolean; stats?: CatalogStatsView; fileCount?: number; cloudCount?: number; fileName?: string; failed?: Array<{ name: string; error: string }>; error?: string }>;
+	confirmExport: (sessionId: string, token: string, uuids: Array<string>) => Promise<{ ok: boolean; stats?: CatalogStatsView; fileName?: string; error?: string }>;
 	cancelCard: (sessionId: string, token: string) => void;
 	resetChatSession: (sessionId: string) => void;
 	selfCheck: () => Promise<string>;
@@ -65,11 +66,12 @@ function installBridge(): void {
 		saveLibraryScope,
 		getLocalLibraryPath,
 		saveLocalLibraryPath,
-		getProjectDirs,
-		saveProjectDirs,
-		importProjectPackage: () => importProjectPackage().catch(e => ({ ok: false, imported: [], failed: [], targetDir: '', error: e instanceof Error ? e.message : String(e) })),
 		getPlacementSettings,
 		savePlacementSettings,
+		getStylePrompt,
+		getDefaultStylePrompt,
+		getStylePresets,
+		saveStylePrompt,
 		onAgentEvent: (sessionId, handler) => {
 			if (typeof handler === 'function')
 				agentEventListeners.set(sessionId, handler);

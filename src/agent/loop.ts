@@ -11,8 +11,8 @@ import type { AgentToolName } from './tools';
 import { fetchCatalog } from '../catalog';
 import { activateSchematicPage, cacheGeometry, collectPageObstacles, DEFAULT_PAGE_WIDTH, estimateGeometry, getCurrentDocState, loadGeometry, modifyCbbModule, parsePlaceTarget, placeCbbModule, planAlignedPlacement, premeasureGeometry, readCbbSchematicSummary } from '../cbb';
 import { effectiveLibraryScope, runSelfCheck } from '../env';
-import { exportProjectPackage } from '../pkg';
-import { getJevSettings, getLlmSettings, getPlacementSettings } from '../settings';
+import { edaGlobal } from '../host';
+import { getJevSettings, getLlmSettings, getPlacementSettings, getStylePrompt } from '../settings';
 import { classifyLlmError, registerAbort, releaseAbort, sendLlmRequest, STREAM_SENTINEL } from './http';
 import { recommendModules } from './jev';
 import { buildAgentRequest, buildPingRequest, parseAgentResponse, StreamAccumulator } from './llm';
@@ -107,8 +107,6 @@ export interface ExportPickView {
 	name: string;
 	src: string;
 	storage: 'cloud' | 'local';
-	/** 本地模块且工程文件路径已解析（zip 内会附带 .eprj2）。 */
-	hasFile: boolean;
 }
 
 export interface ExportCardView {
@@ -176,6 +174,7 @@ function sessionOf(id: string): ChatSession {
 	return s;
 }
 
+/** 只丢弃本会话的对话、确认卡与原理图分析标记。目录缓存在 catalog_store，不随会话重置清除。 */
 export function resetChatSession(sessionId: string): void {
 	sessions.delete(sessionId);
 }
@@ -481,8 +480,6 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 					classification: hit.classification || [],
 					boards: hit.boards || [],
 					storage: hit.storage,
-					localFilePath: hit.localFilePath,
-					localBackupDir: hit.localBackupDir,
 					libraryKind: hit.libraryKind,
 					pageSupport: hit.pageSupport,
 				},
@@ -526,7 +523,6 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 					name: hit.name,
 					src: hit.src,
 					storage: hit.storage,
-					hasFile: hit.storage === 'local' && hit.filePathSource === 'indexed',
 				});
 			}
 			if (!picks.length) {
@@ -542,7 +538,6 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				name: m.name,
 				src: m.src,
 				storage: m.storage,
-				hasFile: m.storage === 'local' && m.filePathSource === 'indexed',
 			})));
 		}
 		const token = newToken();
@@ -557,8 +552,8 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				stats: card.stats,
 				filtered: filtered.length ? filtered : undefined,
 				hint: requested
-					? '已出示按需导出确认卡（只含指定模块，默认全选），等待用户确认后才会写文件；用户在卡上仍可增删勾选（全量清单不在此卡上）。'
-					: '已出示全量导出确认卡（目录全部模块，默认全选），等待用户勾选并确认后才会写文件。',
+					? '已出示按需导出确认卡（只含指定模块，默认全选），等待用户确认后才会另存 JSON；用户在卡上仍可增删勾选（全量清单不在此卡上）。'
+					: '已出示全量导出确认卡（目录全部模块，默认全选），等待用户勾选并确认后才会另存 JSON。',
 			},
 		};
 	},
@@ -812,14 +807,12 @@ export async function chatTurn(
 			const catalogNote = catalogRecord
 				? `\n\n目录缓存摘要（模块明细不在上下文中，找模块按 search_modules / recommend_modules 分工检索）：\n${buildCatalogSummaryPayload(catalogRecord)}${historyNote}`
 				: `\n\n${EMPTY_CATALOG_NOTE}${historyNote}`;
-			// 上下文提示：两个检索工具并存分工（与两工具 description 的「分工」段成对维护）——
-			// 精确关键词走 search_modules（零成本），宽泛/功能描述式需求走 recommend_modules（语义+排序+自动出卡）。
-			// 未配置 Jev Key 时提示模型直接用关键词检索，并顺带提醒用户可补 Key（不阻塞、不强制）。
+			// 上下文提示：工具分工与出卡规则。需求是否具体到可以检索，由系统提示【系统提示词】决定，这里不重复。
 			const jevHint = jevReady
-				? '\n\n找模块按分工二选一：模块名/型号/器件名等精确关键词用 search_modules；需求宽泛、口语化或按功能描述、以及用户要推荐排序时用 recommend_modules，query 直接传用户原始需求整句。recommend_modules 返回 cardShown=true 时放置卡已自动出示，禁止再调 propose_placement 重复出卡，直接写最终说明；cardShown=false 时按返回的 modules（含全量描述与 jevScore）直接回答，不要调 get_module 重复取详情，且不要主动出示放置卡——仅当用户明确要求放置时才调 propose_placement（picks 取自 modules，mode/target 参考 placement 字段），否则给文字方案并询问是否放置。'
-				: '\n\n当前未配置 Jev API Key（可选增强）：recommend_modules 暂不可用，找模块直接用 search_modules；可顺带提醒用户到 设置 → Jev模型接入 补充 API Key（非必需）。';
+				? '\n\n找模块的工具分工：模块名/型号/器件名用 search_modules；带具体功能参数的描述用 recommend_modules，query 传用户原始需求整句。是否已经具体到可以检索，按【系统提示词】判断。recommend_modules 返回 cardShown=true 时放置卡已自动出示，禁止再调 propose_placement 重复出卡，直接写最终说明；cardShown=false 时按返回的 modules（含全量描述与 jevScore）直接回答，不要调 get_module 重复取详情，且不要主动出示放置卡——仅当用户明确要求放置时才调 propose_placement（picks 取自 modules，mode/target 参考 placement 字段）。'
+				: '\n\n当前未配置 Jev API Key（可选增强）：recommend_modules 暂不可用，需要检索时用 search_modules。是否已经具体到可以检索，按【系统提示词】判断。可顺带提醒用户到 设置 → Jev模型接入 补充 API Key（非必需）。';
 			const settings = getLlmSettings();
-			const req = buildAgentRequest(settings, catalogNote + jevHint, s.history);
+			const req = buildAgentRequest(settings, catalogNote + jevHint, s.history, getStylePrompt());
 			req.stream = true;
 			// 流式路径：delta 实时转发；累积器负责把三家协议的增量拼回完整响应。
 			// 通道不支持分块时 sendLlmRequest 自动降级返回完整 JSON（旧解析路径）。
@@ -1176,7 +1169,45 @@ export async function confirmEdit(
 	}
 }
 
-export async function confirmExport(sessionId: string, token: string, uuids: Array<string>): Promise<{ ok: boolean; stats?: CatalogStatsView; fileCount?: number; cloudCount?: number; fileName?: string; failed?: Array<{ name: string; error: string }>; error?: string }> {
+function exportStamp(): string {
+	const d = new Date();
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+/** 按勾选 uuid 过滤目录并另存 JSON。不读工程文件、不打包。 */
+async function saveCatalogJson(selectedUuids: Array<string>, snapshot: CatalogJson): Promise<{ ok: boolean; cancelled?: boolean; fileName: string; stats: CatalogStatsView }> {
+	const saveFile = (edaGlobal()?.sys_FileSystem as { saveFile?: (fileData: Blob, fileName?: string) => Promise<void> } | undefined)?.saveFile;
+	if (typeof saveFile !== 'function')
+		throw new Error('sys_FileSystem.saveFile 不可用，无法另存 JSON');
+	const selected = new Set(selectedUuids);
+	const catalog = JSON.parse(JSON.stringify(snapshot)) as CatalogJson;
+	catalog.libraries = catalog.libraries
+		.map(lib => ({ ...lib, modules: lib.modules.filter(m => selected.has(m.uuid)) }))
+		.filter(lib => lib.modules.length > 0);
+	const modules = catalog.libraries.reduce((n, lib) => n + lib.modules.length, 0);
+	const stats: CatalogStatsView = {
+		libraries: catalog.libraries.length,
+		modules,
+		emptyDesc: catalog.libraries.reduce((n, lib) => n + lib.modules.filter(m => !String(m.description || '').trim()).length, 0),
+		failed: catalog.libraries.filter(lib => lib.failed).length,
+		elapsedMs: 0,
+	};
+	const fileName = `cbb-catalog-${exportStamp()}.json`;
+	const blob = new Blob([JSON.stringify(catalog, null, '\t')], { type: 'application/json' });
+	try {
+		await saveFile(blob, fileName);
+	}
+	catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		if (/取消|cancel/i.test(msg))
+			return { ok: false, cancelled: true, fileName, stats };
+		throw new Error(`保存 JSON 失败：${msg}`);
+	}
+	return { ok: true, fileName, stats };
+}
+
+export async function confirmExport(sessionId: string, token: string, uuids: Array<string>): Promise<{ ok: boolean; stats?: CatalogStatsView; fileName?: string; error?: string }> {
 	const { card } = requireCard(sessionId, token, 'export');
 	if (!Array.isArray(uuids) || !uuids.length)
 		throw new Error('未勾选任何模块');
@@ -1187,20 +1218,17 @@ export async function confirmExport(sessionId: string, token: string, uuids: Arr
 			throw new Error('导出清单与确认卡提案不一致，请重新发起。');
 	}
 	try {
-		// 复用持久化目录导出（与用户确认的内容同源，避免确认后重拉目录导致清单漂移）；
-		// 传入深拷贝，防止 pkg 内的过滤/回写污染存储状态；文件定位在导出时仍按磁盘实况执行。
-		// 缓存为空时 pkg 回退为重新拉取（exportProjectPackage 内置该路径）。
 		const catalogRec = await loadCatalogRecord();
-		const snapshot = catalogRec
-			? JSON.parse(JSON.stringify(catalogRec.catalog)) as CatalogJson
-			: undefined;
-		const r = await exportProjectPackage(uuids, snapshot);
+		if (!catalogRec)
+			throw new Error('目录缓存为空，请先刷新目录后再导出');
+		const snapshot = JSON.parse(JSON.stringify(catalogRec.catalog)) as CatalogJson;
+		const r = await saveCatalogJson(uuids, snapshot);
 		if (!r.ok && !r.cancelled)
 			throw new Error('导出失败');
 		const cardRec = requireCardRecord(sessionId, token);
 		if (cardRec && r.ok)
 			cardRec.status = 'done';
-		return { ok: r.ok, stats: r.stats, fileCount: r.fileCount, cloudCount: r.cloudCount, fileName: r.fileName, failed: r.failed, error: r.cancelled ? '已取消' : undefined };
+		return { ok: r.ok, stats: r.stats, fileName: r.fileName, error: r.cancelled ? '已取消' : undefined };
 	}
 	catch (e) {
 		const msg = e instanceof Error ? e.message : String(e);
