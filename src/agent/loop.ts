@@ -8,15 +8,14 @@ import type { CachedGeometry, PlaceBox, PlaceMode, PlaceTarget, RegionStyle } fr
 import type { HistoryTurn } from './llm';
 import type { CatalogStoreRecord, FlatModule } from './store';
 import type { AgentToolName } from './tools';
-import { fetchCatalog } from '../catalog';
 import { activateSchematicPage, cacheGeometry, collectPageObstacles, DEFAULT_PAGE_WIDTH, estimateGeometry, getCurrentDocState, loadGeometry, modifyCbbModule, parsePlaceTarget, placeCbbModule, planAlignedPlacement, premeasureGeometry, readCbbSchematicSummary } from '../cbb';
-import { effectiveLibraryScope, runSelfCheck } from '../env';
+import { runSelfCheck } from '../env';
 import { edaGlobal } from '../host';
 import { getJevSettings, getLlmSettings, getPlacementSettings, getStylePrompt } from '../settings';
 import { classifyLlmError, registerAbort, releaseAbort, sendLlmRequest, STREAM_SENTINEL } from './http';
 import { recommendModules } from './jev';
 import { buildAgentRequest, buildPingRequest, parseAgentResponse, StreamAccumulator } from './llm';
-import { buildCatalogSummaryPayload, clearCatalogRecord, EMPTY_CATALOG_NOTE, flattenCatalog, humanizeAge, loadCatalogRecord, lookupModule, searchInCatalog, storeCatalog } from './store';
+import { buildCatalogSummaryPayload, clearCatalogRecord, EMPTY_CATALOG_NOTE, flattenCatalog, hiddenLibraryBriefs, humanizeAge, loadModelCatalogRecord, lookupModule, refreshCatalogExclusive, searchInCatalog } from './store';
 import { AGENT_TOOL_NAMES, MAX_DESC_LEN } from './tools';
 
 /** 单条消息最多发起的模型调用轮数（每轮 = 思考 + 可选工具执行；工具结果驱动下一轮）。 */
@@ -235,19 +234,21 @@ function settingsReady(): { ok: true } | { ok: false; missing: Array<string> } {
  */
 async function ensureCatalog(s: ChatSession, force: boolean): Promise<{ record: CatalogStoreRecord; summary: string }> {
 	if (!force) {
-		const cached = await loadCatalogRecord();
+		const cached = await loadModelCatalogRecord();
 		if (cached)
 			return { record: cached, summary: `使用持久化目录缓存：${cached.stats.modules} 个模块（${humanizeAge(Date.now() - cached.fetchedAt)}拉取）` };
 	}
-	const report = await fetchCatalog(await effectiveLibraryScope());
-	const stats = await storeCatalog(report);
+	await refreshCatalogExclusive();
 	if (force)
 		invalidateOpenCards(s);
-	const record = (await loadCatalogRecord())!;
+	const record = (await loadModelCatalogRecord())!;
+	const hidden = await hiddenLibraryBriefs();
 	const failed = record.catalog.libraries.filter(l => l.failed).map(l => `${l.moduleName}：${l.error}`).join('；');
-	const summary = failed
-		? `目录 ${stats.modules} 个模块，失败库 ${stats.failed}（${failed}）`
-		: `目录 ${stats.modules} 个模块 / ${stats.libraries} 库`;
+	let summary = failed
+		? `可见目录 ${record.stats.modules} 个模块，失败库 ${record.stats.failed}（${failed}）`
+		: `可见目录 ${record.stats.modules} 个模块 / ${record.stats.libraries} 库`;
+	if (hidden.length)
+		summary += `。另有 ${hidden.length} 个库已关闭可见范围（${hidden.map(h => h.name).join('、')}），请用户到设置「模块库目录」勾选并保存可见范围，不要为此再刷新或导入`;
 	return { record, summary };
 }
 
@@ -306,6 +307,14 @@ function missingCatalogOutcome(name: AgentToolName): ToolRunOutcome {
 	};
 }
 
+async function noMatchHint(fallback = '没有匹配模块。可换关键词重试，或提示用户把开源广场模块复制到库中后 refresh_catalog。'): Promise<string> {
+	const hidden = await hiddenLibraryBriefs();
+	if (!hidden.length)
+		return fallback;
+	const names = hidden.map(h => h.name).join('、');
+	return `可见范围内没有匹配模块。用户已关闭这些库的可见范围：${names}。请提醒用户打开设置「模块库目录」，勾选对应库并点「保存可见范围」。不要调用 refresh_catalog，也不要建议重新拉取、导入或复制模块。`;
+}
+
 /** 检索结果 → 紧凑条目（给 LLM 看的最小字段集）。 */
 function compactHit(hit: { module: FlatModule }): Record<string, unknown> {
 	const m = hit.module;
@@ -326,7 +335,7 @@ function compactHit(hit: { module: FlatModule }): Record<string, unknown> {
  */
 const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 	search_modules: async (_s, args) => {
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('search_modules');
 		const query = typeof args.query === 'string' ? args.query : '';
@@ -338,7 +347,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				ok: true,
 				matched: hits.length,
 				modules: hits.map(compactHit),
-				hint: hits.length ? '推荐/放置/编辑前用 get_module 获取目标模块完整详情；cbbUuid 必须逐字复制。' : '没有匹配模块。可换关键词重试，或提示用户把开源广场模块复制到个人库后 refresh_catalog。',
+				hint: hits.length ? '推荐/放置/编辑前用 get_module 获取目标模块完整详情；cbbUuid 必须逐字复制。' : await noMatchHint(),
 			},
 		};
 	},
@@ -364,7 +373,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				result: { ok: false, error: 'query 不能为空：请把用户原始需求整句传入（无需提取关键词）。' },
 			};
 		}
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('recommend_modules');
 		try {
@@ -383,7 +392,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				jevConfidence: h.confidence,
 				jevCategory: h.category,
 			}));
-			const notFoundHint = r.hits.length ? undefined : '所需类别下没有模块或全部得分过低（注意：不能断言目录中没有该类模块——可能是类别筛选未覆盖，可用 search_modules 关键词复核）。也可请用户把开源广场模块复制到个人库后 refresh_catalog。';
+			const notFoundHint = r.hits.length ? undefined : await noMatchHint('所需类别下没有模块或全部得分过低（注意：不能断言目录中没有该类模块——可能是类别筛选未覆盖，可用 search_modules 关键词复核）。也可请用户把开源广场模块复制到库中后 refresh_catalog。');
 			// 意图为放置 → 工具内直接出卡（与 propose_placement 同构：令牌绑定提案 uuid 集合），
 			// LLM 不再经手 picks/mode/target——mode/target 由 Jev 意图判定给出，reason 由分数模板生成。
 			if (r.placement?.place && r.hits.length) {
@@ -457,7 +466,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		}
 	},
 	get_module: async (_s, args) => {
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('get_module');
 		const cbbUuid = String(args.cbbUuid || '');
@@ -501,7 +510,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		};
 	},
 	propose_export: async (s, args) => {
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('propose_export');
 		// 按需导出（与放置 picks 同思路）：传入 cbbUuids 时卡上只列这些模块（逐个对目录校验，
@@ -558,7 +567,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		};
 	},
 	inspect_module: async (s, args) => {
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('inspect_module');
 		const cbbUuid = String(args.cbbUuid || '');
@@ -596,7 +605,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		}
 	},
 	propose_edit: async (s, args) => {
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('propose_edit');
 		const cbbUuid = String(args.cbbUuid || '');
@@ -631,7 +640,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		};
 	},
 	propose_placement: async (s, args) => {
-		const rec = await loadCatalogRecord();
+		const rec = await loadModelCatalogRecord();
 		if (!rec)
 			return missingCatalogOutcome('propose_placement');
 		const raw = Array.isArray(args.picks) ? args.picks as Array<Record<string, unknown>> : [];
@@ -795,17 +804,18 @@ export async function chatTurn(
 			// 每轮重建目录摘要注入：refresh_catalog 落盘后旧摘要必须作废，
 			// 否则同轮上下文里是旧统计、observation 是新统计，模型会被两份数据打架。
 			// 摘要仅含统计 + 各库计数 + 新鲜度（几百 token）；模块明细走 search_modules/get_module。
-			// loadCatalogRecord 读内存缓存 → sys_Storage（唯一持久层）：扩展重启后内存层为空，
+			// loadModelCatalogRecord 读内存缓存 → sys_Storage（唯一持久层）：扩展重启后内存层为空，
 			// 首轮经此从落盘缓存回填——持久化缓存有效时注入真实摘要而非"缓存为空"，
 			// 避免模型每次重启都盲目 refresh_catalog 重拉全量（约 20 秒）；refresh 落盘后内存层已更新，仍即时生效。
-			const catalogRecord = await loadCatalogRecord();
+			const catalogRecord = await loadModelCatalogRecord();
+			const hiddenLibraries = await hiddenLibraryBriefs();
 			const userTurns = s.history.filter(h => h.role === 'user').length;
 			// 轮数信号：模型无法自数轮数，注入确定性计数；超过阈值时明确建议压缩（compact_history）。
 			const historyNote = `\n\n当前对话 ${userTurns} 轮${userTurns > COMPACT_SUGGEST_TURNS ? '，建议调用 compact_history 折叠早期对话（把此前对话的完整摘要写入 summary 参数）' : ''}。`;
 			const jev = getJevSettings();
 			const jevReady = jev.apiKey.trim() !== '';
 			const catalogNote = catalogRecord
-				? `\n\n目录缓存摘要（模块明细不在上下文中，找模块按 search_modules / recommend_modules 分工检索）：\n${buildCatalogSummaryPayload(catalogRecord)}${historyNote}`
+				? `\n\n目录缓存摘要（模块明细不在上下文中，找模块按 search_modules / recommend_modules 分工检索）：\n${buildCatalogSummaryPayload(catalogRecord, hiddenLibraries)}${historyNote}`
 				: `\n\n${EMPTY_CATALOG_NOTE}${historyNote}`;
 			// 上下文提示：工具分工与出卡规则。需求是否具体到可以检索，由系统提示【系统提示词】决定，这里不重复。
 			const jevHint = jevReady
@@ -1218,7 +1228,7 @@ export async function confirmExport(sessionId: string, token: string, uuids: Arr
 			throw new Error('导出清单与确认卡提案不一致，请重新发起。');
 	}
 	try {
-		const catalogRec = await loadCatalogRecord();
+		const catalogRec = await loadModelCatalogRecord();
 		if (!catalogRec)
 			throw new Error('目录缓存为空，请先刷新目录后再导出');
 		const snapshot = JSON.parse(JSON.stringify(catalogRec.catalog)) as CatalogJson;

@@ -28,10 +28,10 @@ const K_PROVIDER = 'llm_provider';
 const K_BASE = 'llm_base_url';
 const K_KEY = 'llm_api_key';
 const K_MODEL = 'llm_model';
-const K_SCOPE = 'library_scope';
 const K_LOCAL_PATH = 'local_library_path';
 const K_PLACE = 'placement_settings';
 const K_STYLE = 'style_prompt';
+const K_HIDDEN_LIBS = 'model_hidden_libraries';
 
 /** 半离线模式下路径发现 API 全部失效时的本地库兜底路径。 */
 export const DEFAULT_LOCAL_LIBRARY_PATH = 'C:\\Users\\JLC\\Documents\\LCEDA-Pro\\libraries';
@@ -118,32 +118,31 @@ export function saveLlmSettings(s: LlmSettings): void {
 	sysSet(K_MODEL, s.model || '');
 }
 
-export function getLibraryScope(): Record<string, boolean> {
-	const raw = lsGet(K_SCOPE) || sysGet(K_SCOPE);
-	if (raw) {
-		try {
-			const parsed = JSON.parse(raw) as Record<string, boolean>;
-			if (parsed && typeof parsed === 'object') {
-				return {
-					personal: parsed.personal !== false,
-					team: parsed.team !== false,
-					local: parsed.local !== false,
-				};
-			}
-		}
-		catch { /* 损坏则回退默认 */ }
-	}
-	return { personal: true, team: true, local: true };
+/** 模型不可见的库。键为 libraryKind:libraryUuid（无 uuid 时用库名）。未出现的库默认可见。 */
+export function libraryVisibilityKey(lib: { libraryUuid: string; libraryKind: string; moduleName: string }): string {
+	const id = String(lib.libraryUuid || '').trim();
+	return id ? `${lib.libraryKind}:${id}` : `${lib.libraryKind}:${lib.moduleName}`;
 }
 
-export function saveLibraryScope(scope: Record<string, boolean>): void {
-	const text = JSON.stringify({
-		personal: scope?.personal !== false,
-		team: scope?.team !== false,
-		local: scope?.local !== false,
-	});
-	lsSet(K_SCOPE, text);
-	sysSet(K_SCOPE, text);
+export function getHiddenLibraryKeys(): Array<string> {
+	const raw = lsGet(K_HIDDEN_LIBS) || sysGet(K_HIDDEN_LIBS);
+	if (!raw)
+		return [];
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		return Array.isArray(parsed) ? parsed.filter(k => typeof k === 'string' && k) : [];
+	}
+	catch {
+		return [];
+	}
+}
+
+/** 一次写入模型不可见的库。未出现在列表里的库保持可见。 */
+export function saveHiddenLibraryKeys(keys: Array<string>): void {
+	const next = [...new Set((keys || []).map(k => String(k || '').trim()).filter(Boolean))];
+	const text = JSON.stringify(next);
+	lsSet(K_HIDDEN_LIBS, text);
+	sysSet(K_HIDDEN_LIBS, text);
 }
 
 export function getLocalLibraryPath(): string {

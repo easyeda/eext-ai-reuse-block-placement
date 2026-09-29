@@ -219,6 +219,8 @@
   .btn:hover{border-color:var(--blue); color:var(--blue);}
   .btn.primary{background:var(--blue); border-color:var(--blue); color:#fff; font-weight:500;}
   .btn.primary:hover{background:var(--blue-2); color:#fff;}
+  .btn.danger{background:var(--red); border-color:var(--red); color:#fff; font-weight:500;}
+  .btn.danger:hover{filter:brightness(.92); color:#fff; border-color:var(--red);}
   .btn:disabled{opacity:.5; cursor:not-allowed;}
   .btn.link{border:none; background:none; color:var(--blue); padding:2px 4px; text-decoration:underline;}
   /* ── 空会话首屏（Gemini 风格）：大字问候 + 建议选项（复用 chips 点击逻辑），首条消息后隐藏 ── */
@@ -262,15 +264,22 @@
   /* 停止态：红色方块按钮（发送中点击 = 中止本轮） */
   #send.stopping{background:var(--red); color:#fff;}
   #send.stopping:hover{background:#c22c31;}
-  #page-settings{overflow-y:auto; padding:18px 20px 30px; display:none;}
-  #page-settings.on{display:block;}
+  #page-settings{overflow:hidden; padding:8px 10px 6px; display:none; gap:6px;}
+  #page-settings.on{display:flex; flex-direction:column;}
+  .settings-grid{flex:1; min-height:0; display:grid; grid-template-columns:1fr 1fr;
+    grid-template-rows:auto auto minmax(0,1fr); gap:8px; align-items:stretch;}
   .sec{border:1px solid var(--line); border-radius:var(--radius); background:var(--panel);
-    margin-bottom:16px; overflow:hidden;}
-  .sec-hd{padding:10px 15px; font-weight:600; font-size:13px; background:var(--panel-2); border-bottom:1px solid var(--line);
-    display:flex; align-items:center; gap:8px;}
-  .sec-bd{padding:13px 15px;}
-  .frow{display:flex; align-items:center; gap:10px; margin-bottom:10px;}
-  .frow label{width:88px; flex:none; color:var(--text-2); font-size:12.5px; text-align:right;}
+    margin-bottom:0; overflow:hidden; display:flex; flex-direction:column; min-height:0;}
+  #secCatalog{min-height:0;}
+  .sec-hd{padding:6px 12px; font-weight:600; font-size:12.5px; background:var(--panel-2); border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:8px; flex:none;}
+  .sec-bd{padding:8px 10px; min-height:0;}
+  #secCatalog .sec-bd{flex:1; display:flex; flex-direction:column; overflow:hidden;}
+  #secCatalog .pnote,
+  #secCatalog .frow,
+  #secCatalog .opresult{flex:none;}
+  .frow{display:flex; align-items:center; gap:8px; margin-bottom:6px;}
+  .frow label{width:72px; flex:none; color:var(--text-2); font-size:12px; text-align:right;}
   .frow .fctl{flex:1; min-width:0; display:flex; align-items:center; gap:8px;}
   .frow input[type=text], .frow input[type=password], .frow select{
     flex:1; padding:6px 10px; border:1px solid var(--line); border-radius:7px;
@@ -286,25 +295,25 @@
   .pitem input[type=text]{width:96px;}
   .punit{font-size:11px; color:var(--meta);}
   .pnote{font-size:11px; color:var(--meta); margin-top:2px;}
-  #setStyle{width:100%; min-height:220px; resize:vertical; box-sizing:border-box; margin:8px 0 10px; padding:8px 10px;
+  #setStyle{width:100%; height:64px; min-height:0; resize:vertical; box-sizing:border-box; margin:0 0 6px; padding:6px 8px;
     border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text);
     font:12.5px/1.55 Consolas,Menlo,monospace; outline:none;}
   #setStyle:focus{border-color:var(--blue);}
   .note{font-size:11.5px; color:var(--text-3); margin:2px 0 10px; padding-left:98px;}
   .note.flush{padding-left:0;}
-  /* 库范围只读展示行：来源名 + 可用性徽标（三源直测结果，用户不可更改） */
-  .scoperow{display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid var(--line);
-    border-radius:8px; margin-bottom:6px; background:var(--panel-2);}
-  .scoperow b{flex:1; font-size:12.5px;}
+  /* 目录库行：名称 + 模块数 / 可见性勾选 */
+  .scoperow{display:flex; align-items:center; gap:8px; padding:4px 8px; border:1px solid var(--line);
+    border-radius:8px; margin-bottom:4px; background:var(--panel-2);}
+  .scoperow b{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12.5px;}
+  #catalogLibs{flex:1; min-height:0; overflow-y:auto;}
+  .scoperow input{flex:none;}
   .scope-badge{flex:none; font-size:11px; padding:2px 8px; border-radius:8px; font-weight:500;}
   .scope-badge.ok{color:var(--green); background:var(--green-soft);}
   .scope-badge.bad{color:var(--red); background:var(--red-soft);}
   .opresult{font-size:12px; margin-top:4px; padding:7px 11px; border-radius:7px; display:none;}
   .opresult.ok{display:block; background:var(--green-soft); color:var(--green);}
   .opresult.err{display:block; background:var(--red-soft); color:var(--red);}
-  .env{font-size:11.5px; color:var(--text-2); background:var(--panel-2); border:1px solid var(--line);
-    border-radius:7px; padding:6px 10px; margin-bottom:10px;}
-  .env.warn{background:var(--amber-soft); border-color:var(--amber-line);}
+  .opresult.wait{display:block; background:var(--amber-soft); color:var(--text-2);}
   pre.diag{font:11px/1.6 Consolas,Menlo,monospace; background:var(--panel-2); border:1px solid var(--line);
     border-radius:7px; padding:10px; white-space:pre-wrap; word-break:break-all; display:none; margin-top:8px;}
 </style>
@@ -355,6 +364,7 @@
       </div>
     </section>
     <section class="page" id="page-settings">
+      <div class="settings-grid">
       <div class="sec">
         <div class="sec-hd">模型接入</div>
         <div class="sec-bd">
@@ -403,13 +413,6 @@
         </div>
       </div>
       <div class="sec">
-        <div class="sec-hd">库范围</div>
-        <div class="sec-bd">
-          <div class="env" id="envLine" hidden></div>
-          <div id="scopeList"><div class="scoperow"><b>检测中…</b></div></div>
-        </div>
-      </div>
-      <div class="sec">
         <div class="sec-hd">放置排布</div>
         <div class="sec-bd">
           <div class="prow">
@@ -424,7 +427,6 @@
             <span class="pitem">线宽 <input type="number" id="setBorderWidth" min="1" step="1" placeholder="默认"></span>
             <span class="pitem">边距 <input type="number" id="setMargin" min="0" step="10" placeholder="40"></span>
           </div>
-          <div class="pnote">模块自动按对齐网格排布并避开已占用区域；标注标题固定红色 · 0.2inch · 居中。保存后下次放置生效。</div>
         </div>
       </div>
       <div class="sec">
@@ -432,19 +434,25 @@
         <div class="sec-bd">
           <textarea id="setStyle" spellcheck="false"></textarea>
           <div class="frow"><label></label><div class="fctl">
-            <button class="btn" id="presetRigorous" type="button">严谨风格</button>
-            <button class="btn" id="presetRelaxed" type="button">宽松风格</button>
+            <button class="btn" id="presetRigorous" type="button">严谨简短</button>
+            <button class="btn" id="presetRelaxed" type="button">宽松详细</button>
             <button class="btn primary" id="saveStyle" type="button">保存</button>
           </div></div>
           <div class="opresult" id="styleResult"></div>
         </div>
       </div>
-      <div class="sec">
-        <div class="sec-hd">关于</div>
-        <div class="sec-bd" style="font-size:12px; color:var(--text-2);">
-          复用模块 AI 对话助手 · ai-reuse-block-placement v0.8.0<br>
-          自然语言找模块、确认后放置、改描述、导出目录。写操作必须经确认卡。
+      <div class="sec" id="secCatalog">
+        <div class="sec-hd">模块库目录</div>
+        <div class="sec-bd">
+          <div class="pnote" id="catalogStatus">尚未拉取模块库目录。</div>
+          <div id="catalogLibs"></div>
+          <div class="frow"><label></label><div class="fctl">
+            <button class="btn primary" id="btnSaveCatalogVis" type="button">保存可见范围</button>
+            <button class="btn danger" id="btnRefreshCatalog" type="button">重新拉取</button>
+          </div></div>
+          <div class="opresult" id="catalogResult"></div>
         </div>
+      </div>
       </div>
     </section>
   </main>
@@ -489,30 +497,30 @@
   }
 
   const MOCK_MODULES = [
-    { uuid: 'cbb-ams1117-3v3', name: 'DCDC-5V转3.3V-AMS1117', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-ams1117-3v3', name: 'DCDC-5V转3.3V-AMS1117', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['电源', 'LDO'], reason: '线性稳压，压差 1.7V，适合小电流 3.3V 供电。',
       description: '输入 5V，输出 3.3V/800mA。AMS1117-3.3，SOT-223。' },
-    { uuid: 'cbb-mp1584-3v3', name: 'DCDC-5V转3.3V-MP1584', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-mp1584-3v3', name: 'DCDC-5V转3.3V-MP1584', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['电源', 'DCDC'], reason: '开关降压，效率高、支持 3A 输出。',
       description: '输入 4.5-28V，输出 3.3V/3A。MP1584EN。' },
-    { uuid: 'cbb-esp32c3-core', name: 'ESP32-C3最小系统', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-esp32c3-core', name: 'ESP32-C3最小系统', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['主控', 'WiFi'], reason: 'RISC-V 单核，内置 WiFi/BLE。',
       description: 'ESP32-C3FN4，含去耦、晶振、复位与 Boot。' },
-    { uuid: 'cbb-tp4056', name: '锂电池充电-TP4056', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-tp4056', name: '锂电池充电-TP4056', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['电源', '充电'], reason: '单节锂电线性充电 1A。',
       description: 'USB Type-C 输入，TP4056 1A 充电。' },
-    { uuid: 'cbb-usb-typec', name: 'USB-TypeC-5V输入接口', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-usb-typec', name: 'USB-TypeC-5V输入接口', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['接口', 'USB'], reason: 'Type-C 母座 5V 取电。',
       description: '16P Type-C 母座，5.1k CC 下拉。' },
-    { uuid: 'cbb-rs485', name: 'RS485-自动收发', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-rs485', name: 'RS485-自动收发', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['接口', 'RS485'], reason: 'MAX3485 自动收发方向控制。',
       description: 'MAX3485，3.3V，AB 线 120R + TVS。' },
-    { uuid: 'cbb-stm32f103', name: 'STM32F103C8T6最小系统', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-stm32f103', name: 'STM32F103C8T6最小系统', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['主控', 'MCU'], reason: '经典蓝 pill 核心。',
       description: 'STM32F103C8T6，8MHz 晶振、SWD。' },
-    { uuid: 'cbb-filter-pi', name: '电源滤波-π型', libraryKind: 'personal', src: '个人库', pageSupport: true,
+    { uuid: 'cbb-filter-pi', name: '电源滤波-π型', libraryKind: 'personal', src: 'lib-personal', pageSupport: true,
       classification: ['电源', '滤波'], reason: '共模+差模 π 型滤波。', description: '' },
-    { uuid: 'cbb-can-tja1051', name: 'CAN收发-TJA1051', libraryKind: 'local', src: '本地库', pageSupport: false,
+    { uuid: 'cbb-can-tja1051', name: 'CAN收发-TJA1051', libraryKind: 'local', src: 'C:\\\\Users\\\\JLC\\\\Documents\\\\LCEDA-Pro\\\\libraries', pageSupport: false,
       classification: ['接口', 'CAN'], reason: '本地库示例：复用模块图页不可用。',
       description: 'TJA1051 5Mbps CAN 收发器。' },
     { uuid: 'cbb-team-wheel', name: '滚轮模块', libraryKind: 'team', src: '团队test', pageSupport: true,
@@ -522,11 +530,11 @@
   const MOCK_CATALOG = {
     stats: { libraries: 3, modules: MOCK_MODULES.length, emptyDesc: 1, failed: 0, elapsedMs: 1218 },
     libraries: [
-      { libraryUuid: 'lib-personal', moduleName: '个人库', libraryKind: 'personal', failed: false, error: null,
+      { libraryUuid: 'lib-personal', moduleName: 'lib-personal', libraryKind: 'personal', failed: false, error: null,
         modules: MOCK_MODULES.filter(m => m.libraryKind === 'personal') },
       { libraryUuid: 'lib-team-test', moduleName: '团队test', libraryKind: 'team', failed: false, error: null,
         modules: MOCK_MODULES.filter(m => m.libraryKind === 'team') },
-      { libraryUuid: 'C:\\\\Users\\\\JLC\\\\Documents\\\\LCEDA-Pro\\\\libraries', moduleName: '本地库', libraryKind: 'local', failed: false, error: null,
+      { libraryUuid: 'C:\\\\Users\\\\JLC\\\\Documents\\\\LCEDA-Pro\\\\libraries', moduleName: 'C:\\\\Users\\\\JLC\\\\Documents\\\\LCEDA-Pro\\\\libraries', libraryKind: 'local', failed: false, error: null,
         modules: MOCK_MODULES.filter(m => m.libraryKind === 'local') },
     ],
   };
@@ -560,14 +568,20 @@
     return out;
   }
 
+  let mockCatalogAdmin = {
+    empty: false, fetchedAt: Date.now() - 3600_000, moduleCount: 11,
+    libraries: [
+      { key: 'personal:lib-personal', kind: 'personal', name: 'lib-personal', modules: 8, failed: false, visible: true },
+      { key: 'team:lib-team-test', kind: 'team', name: '团队test', modules: 1, failed: false, visible: true },
+      { key: 'local:local', kind: 'local', name: 'C:\\\\Users\\\\JLC\\\\Documents\\\\LCEDA-Pro\\\\libraries', modules: 1, failed: false, visible: false },
+    ],
+  };
   const mockBridge = {
     version: '0.4.0-mock',
     getLlmSettings() { return { provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value }; },
     saveLlmSettings() { return; },
     onAgentEvent(_sid, handler) { mockEventHandler = typeof handler === 'function' ? handler : null; },
     abortChatTurn() { mockAborted = true; return true; },
-    getLibraryScope() { return { personal: true, team: true, local: true }; },
-    saveLibraryScope() { return; },
     getLocalLibraryPath() { return ''; },
     saveLocalLibraryPath() { return; },
     getPlacementSettings() { return { gapX: 80, gapY: 80, borderColor: '', borderWidth: null, margin: 40 }; },
@@ -581,11 +595,29 @@
     getStylePresets() {
       const reply = '回复用中文。可用 Markdown 排版：**加粗**模块名与关键参数、行内代码、列表、表格、围栏代码块。不要输出图片、HTML 标签和表情字符。不要在回复中写出 apiKey 或完整密钥。\n\n改名称或描述时，直接根据已读取的原理图给出建议，不要先反问用户索要信息。';
       return {
-        rigorous: '需求不够具体时，先指导用户把描述说准确，再去查找或放置模块。例如用户只说「找一个电源模块并放置」：不要开始查找，也不要列出目录里的全部或大量模块，更不要直接给出放置方案。请用户补充能区分模块的条件（电压、电流、接口、具体功能），或直接指定模块名称/型号。条件说清楚或点名模块之后再查找；用户同时要求放置时才给出放置确认。只有用户明确要浏览目录（如「有哪些模块」）时才查找，并按库概括，不要把整库逐条倒出来。\n\n' + reply,
-        relaxed: '需求比较宽时不要反复追问，直接查找并推荐 1～3 个较匹配的模块，按匹配程度从高到低说明。例如用户说「找一个电源模块并放置」，先给出少量候选；用户同时要求放置时，再给出放置确认。不要把目录里的模块逐条全部列出来。\n\n' + reply,
+        rigorous: '回复要短。能一句说清就不要展开，不写背景、不写对照、不列多余选项。\n\n需求不够具体时，先停下来问清楚，再去查找或放置。例如用户只说「找一个电源模块并放置」：不要开始查找，不要列出目录，也不要给出放置方案。只问能区分模块的条件（电压、电流、接口或具体功能），或请用户直接指定模块名称。条件说清或点名之后再查找；用户同时要求放置时，再给出放置确认。\n\n只有用户明确要浏览目录（如「有哪些模块」）时才查找，按库用一两句话概括，不要逐条列出。\n\n' + reply,
+        relaxed: '回复可以写完整。说明推荐理由、模块之间的差别，以及用户接下来可以怎么选。\n\n需求比较宽时不要反复追问。直接查找并推荐 1～3 个较匹配的模块，按匹配程度从高到低写清关键参数和适用场合。例如用户说「找一个电源模块并放置」，先给出少量候选并比较差异；用户同时要求放置时，再给出放置确认。\n\n不要把目录里的模块逐条全部列出来。用户要浏览目录时，按库归纳，并点出每类里值得看的几条。\n\n' + reply,
       };
     },
     saveStylePrompt() { $('#setStyle').dataset.saved = '1'; },
+    async getCatalogAdmin() { return JSON.parse(JSON.stringify(mockCatalogAdmin)); },
+    async refreshCatalogNow() {
+      await sleep(400);
+      mockCatalogAdmin = {
+        empty: false, fetchedAt: Date.now(), moduleCount: 11,
+        libraries: [
+          { key: 'personal:lib-personal', kind: 'personal', name: 'lib-personal', modules: 8, failed: false, visible: true },
+          { key: 'team:lib-team-test', kind: 'team', name: '团队test', modules: 1, failed: false, visible: true },
+          { key: 'local:local', kind: 'local', name: 'C:\\\\Users\\\\JLC\\\\Documents\\\\LCEDA-Pro\\\\libraries', modules: 1, failed: false, visible: false },
+        ],
+      };
+      return { ok: true, modules: 11, libraries: 3 };
+    },
+    saveHiddenLibraryKeys(keys) {
+      const hidden = new Set(keys || []);
+      for (const lib of mockCatalogAdmin.libraries || [])
+        lib.visible = !hidden.has(lib.key);
+    },
     async chatTurn(_sid, userText) {
       await sleep(300);
       const t = String(userText || '');
@@ -693,16 +725,6 @@
     async selfCheck() {
       await sleep(400);
       return '⚠ 当前为浏览器 mock，未注入 eda。\n在嘉立创EDA中打开本面板后走真桥自检。';
-    },
-    async getClientEnv() {
-      await sleep(200);
-      return {
-        mode: 'online', modeSource: 'probe', isWeb: false, isClient: true,
-        edition: 'jlc-eda-pro', appVersion: '3.2.166', compliedDate: '',
-        username: 'demo', userUuid: 'demo-user-uuid', login: true,
-        personalAvailable: true, teamAvailable: true, localAvailable: false,
-        notes: ['浏览器 mock：演示在线模式（本地库不可达）'],
-      };
     },
     async testConnection() {
       await sleep(600);
@@ -1326,7 +1348,7 @@
       <div class="pick-item">
         <input type="checkbox" class="ep-check" data-i="${i}" checked>
         <div class="pi-main">
-          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span><span class="pi-reason">${p.storage === 'local' ? '本地库' : '云端库'}</span></div>
+          <div class="pi-title"><span class="pi-name">${esc(p.name)}</span> <span class="pick-src">${esc(p.src)}</span></div>
         </div>
       </div>`).join('');
     const statParts = [];
@@ -1535,6 +1557,7 @@
     $('#page-settings').classList.toggle('on', name === 'settings');
     const gear = $('#settingsBtn');
     if (gear) gear.classList.toggle('on', name === 'settings');
+    if (name === 'settings') renderCatalogAdmin();
   }
   document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.page));
   $('#settingsBtn').onclick = () => switchTab(
@@ -1609,7 +1632,7 @@
   function readJevForm() {
     return { apiKey: $('#jevKey').value, baseUrl: $('#jevBase').value, model: $('#jevModel').value };
   }
-  $('#jevSave').onclick = () => {
+  $('#jevSave').onclick = async () => {
     const r = $('#jevResult');
     try {
       if (typeof bridge.saveJevSettings !== 'function') {
@@ -1617,6 +1640,7 @@
         return;
       }
       bridge.saveJevSettings(readJevForm());
+      await refreshSettingsPage();
       r.className = 'opresult ok'; r.textContent = '✅ Jev 设置已保存（双写）。';
     } catch (e) {
       r.className = 'opresult err'; r.textContent = '保存失败：' + e.message;
@@ -1674,7 +1698,12 @@
   }
   loadSettingsIntoForm();
 
-  $('#saveStyle').onclick = () => {
+  async function refreshSettingsPage() {
+    loadSettingsIntoForm();
+    await renderCatalogAdmin();
+  }
+
+  $('#saveStyle').onclick = async () => {
     const r = $('#styleResult');
     try {
       if (typeof bridge.saveStylePrompt !== 'function') {
@@ -1682,8 +1711,7 @@
         return;
       }
       bridge.saveStylePrompt($('#setStyle').value);
-      if (!$('#setStyle').value.trim() && typeof bridge.getStylePrompt === 'function')
-        $('#setStyle').value = bridge.getStylePrompt();
+      await refreshSettingsPage();
       r.className = 'opresult ok'; r.textContent = '已保存，下一条消息生效。';
     } catch (e) {
       r.className = 'opresult err'; r.textContent = '保存失败：' + e.message;
@@ -1695,50 +1723,95 @@
     $('#setStyle').value = text;
     const r = $('#styleResult'); r.className = ''; r.textContent = '已填入' + label + '，点「保存」后生效。';
   }
-  $('#presetRigorous').onclick = () => fillStylePreset('rigorous', '严谨风格');
-  $('#presetRelaxed').onclick = () => fillStylePreset('relaxed', '宽松风格');
+  $('#presetRigorous').onclick = () => fillStylePreset('rigorous', '严谨简短');
+  $('#presetRelaxed').onclick = () => fillStylePreset('relaxed', '宽松详细');
 
-  /* ── 客户端模式检测（初始时）：三源直测结果驱动库范围只读展示 ── */
-  const MODE_LABELS = { online: '在线版', 'half-offline': '半离线版', offline: '全离线版', unknown: '模式未判定' };
-  async function applyClientEnv() {
-    if (typeof bridge.getClientEnv !== 'function') return;
-    const line = $('#envLine');
-    const scopeList = $('#scopeList');
-    try {
-      const env = await bridge.getClientEnv();
-      /* 只展示可用的库；不可用的库提示切换客户端模式 */
-      const avail = [];
-      const unavail = [];
-      if (env.personalAvailable !== false) avail.push('个人库'); else unavail.push('个人库');
-      if (env.teamAvailable !== false) avail.push('团队库'); else unavail.push('团队库');
-      if (env.localAvailable) avail.push('本地库'); else unavail.push('本地库');
-      const switchHint = unavail.length
-        ? (env.mode === 'online'
-            ? `如需使用${unavail.join('、')}，请切换到半离线 / 全离线客户端`
-            : `如需使用${unavail.join('、')}，请切换到在线版客户端`)
-        : '';
-      if (line) {
-        line.hidden = false;
-        line.innerHTML = `🧭 <b>${esc(MODE_LABELS[env.mode] || env.mode)}</b>：${esc(avail.join('、'))}可用。${esc(switchHint)}`;
-        if (unavail.length) line.classList.add('warn');
-      }
-      if (scopeList) {
-        const rows = [
-          ['个人库（云端）', env.personalAvailable !== false],
-          ['团队库（云端）', env.teamAvailable !== false],
-          ['本地库（离线 / 半离线）', env.localAvailable],
-        ];
-        scopeList.innerHTML = rows.map(([n, ok]) =>
-          `<div class="scoperow"><b>${esc(n)}</b><span class="scope-badge ${ok ? 'ok' : 'bad'}">${ok ? '可用' : '不可达'}</span></div>`).join('');
-      }
-    }
-    catch (e) {
-      if (scopeList) scopeList.innerHTML = '<div class="scoperow"><b>检测结果不可用</b><span class="scope-badge bad">各源按失败隔离尝试拉取</span></div>';
-    }
+  function catalogAge(ms) {
+    if (!ms) return '';
+    const age = Date.now() - ms;
+    if (age < 60_000) return '刚刚拉取';
+    if (age < 3_600_000) return `${Math.floor(age / 60_000)} 分钟前拉取`;
+    if (age < 86_400_000) return `${Math.floor(age / 3_600_000)} 小时前拉取`;
+    return `${Math.floor(age / 86_400_000)} 天前拉取`;
   }
-  applyClientEnv();
+  async function renderCatalogAdmin() {
+    const status = $('#catalogStatus');
+    const list = $('#catalogLibs');
+    if (!status || !list || typeof bridge.getCatalogAdmin !== 'function') return;
+    let view;
+    try { view = await bridge.getCatalogAdmin(); }
+    catch (e) {
+      status.textContent = '模块库目录读取失败。';
+      list.innerHTML = '';
+      return;
+    }
+    if (!view || view.empty) {
+      status.textContent = '尚未拉取模块库目录。';
+      list.innerHTML = '';
+      return;
+    }
+    status.textContent = `${view.libraries.length} 个库 · ${view.moduleCount} 个模块 · ${catalogAge(view.fetchedAt)}`;
+    list.innerHTML = (view.libraries || []).map(lib => `
+      <label class="scoperow">
+        <input type="checkbox" data-key="${esc(lib.key)}" ${lib.visible ? 'checked' : ''}>
+        <b>${esc(lib.name || lib.key)}</b>
+        <span class="scope-badge ${lib.failed ? 'bad' : 'ok'}">${lib.failed ? '拉取失败' : lib.modules + ' 个模块'}</span>
+      </label>`).join('');
+  }
+  $('#btnSaveCatalogVis').onclick = async () => {
+    const r = $('#catalogResult');
+    const boxes = [...$('#catalogLibs').querySelectorAll('input[data-key]')];
+    if (!boxes.length) {
+      r.className = 'opresult err';
+      r.textContent = '还没有可保存的库，请先重新拉取。';
+      return;
+    }
+    if (typeof bridge.saveHiddenLibraryKeys !== 'function') {
+      r.className = 'opresult err';
+      r.textContent = '当前版本不能保存可见范围。';
+      return;
+    }
+    try {
+      bridge.saveHiddenLibraryKeys(boxes.filter(box => !box.checked).map(box => box.dataset.key));
+      await refreshSettingsPage();
+      r.className = 'opresult ok';
+      r.textContent = '可见范围已保存，下一条消息生效。';
+    } catch (e) {
+      r.className = 'opresult err';
+      r.textContent = '保存失败：' + (e.message || String(e));
+    }
+  };
+  $('#btnRefreshCatalog').onclick = async () => {
+    const r = $('#catalogResult');
+    const btn = $('#btnRefreshCatalog');
+    if (typeof bridge.refreshCatalogNow !== 'function') {
+      r.className = 'opresult err'; r.textContent = '当前版本不能在设置里重新拉取。';
+      return;
+    }
+    btn.disabled = true; btn.textContent = '拉取中…';
+    const saveBtn = $('#btnSaveCatalogVis');
+    if (saveBtn) saveBtn.disabled = true;
+    r.className = 'opresult wait';
+    r.textContent = '拉取数据可能需要数分钟，请您耐心等待。';
+    try {
+      const res = await bridge.refreshCatalogNow();
+      if (res && res.ok) {
+        await refreshSettingsPage();
+        r.className = 'opresult ok';
+        r.textContent = `已拉取 ${res.libraries ?? 0} 个库、${res.modules ?? 0} 个模块。`;
+      } else {
+        r.className = 'opresult err';
+        r.textContent = (res && res.error) || '拉取失败';
+      }
+    } catch (e) {
+      r.className = 'opresult err';
+      r.textContent = e.message || String(e);
+    }
+    btn.disabled = false; btn.textContent = '重新拉取';
+    if (saveBtn) saveBtn.disabled = false;
+  };
 
-  $('#saveSettings').onclick = () => {
+  $('#saveSettings').onclick = async () => {
     try {
       bridge.saveLlmSettings({ provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value });
       if (typeof bridge.savePlacementSettings === 'function') {
@@ -1753,6 +1826,7 @@
         });
       }
       renderStatus();
+      await refreshSettingsPage();
       const r = $('#connResult'); r.className = 'opresult ok'; r.textContent = '✅ 设置已保存（双写）。放置排布设置下次放置生效。';
     } catch (e) {
       const r = $('#connResult'); r.className = 'opresult err'; r.textContent = '保存失败：' + e.message;

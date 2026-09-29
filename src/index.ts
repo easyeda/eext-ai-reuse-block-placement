@@ -2,15 +2,16 @@
  * 扩展入口 + iframe 桥。UI 在 iframe/chat.html；写画布/写库/导出必须走确认卡令牌。
  */
 import type { AgentEvent, CatalogStatsView, ChatTurnResult, PlaceCbbItem } from './agent/loop';
-import type { ClientEnv } from './env';
+import type { CatalogLibraryAdmin } from './agent/store';
 import type { JevSettings, LlmSettings, PlacementSettings } from './settings';
 import * as extensionConfig from '../extension.json';
 import { abortSession } from './agent/http';
 import { testJevConnection } from './agent/jev';
 import { cancelCard, chatTurn, confirmEdit, confirmExport, confirmPlace, resetChatSession, testLlmConnection } from './agent/loop';
-import { detectClientEnv, runSelfCheck } from './env';
+import { describeCatalogLibraries, refreshCatalogExclusive } from './agent/store';
+import { runSelfCheck } from './env';
 import { edaGlobal } from './host';
-import { getDefaultStylePrompt, getJevSettings, getLibraryScope, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getStylePresets, getStylePrompt, saveJevSettings, saveLibraryScope, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveStylePrompt } from './settings';
+import { getDefaultStylePrompt, getJevSettings, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getStylePresets, getStylePrompt, saveHiddenLibraryKeys, saveJevSettings, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveStylePrompt } from './settings';
 
 export const VERSION = extensionConfig.version;
 
@@ -21,8 +22,6 @@ export interface CbbCopilotBridge {
 	/** Jev 语义推荐设置（独立 Key 与开关；与主 LLM 相互独立）。 */
 	getJevSettings: () => JevSettings;
 	saveJevSettings: (s: JevSettings) => void;
-	getLibraryScope: () => Record<string, boolean>;
-	saveLibraryScope: (scope: Record<string, boolean>) => void;
 	getLocalLibraryPath: () => string;
 	saveLocalLibraryPath: (path: string) => void;
 	getPlacementSettings: () => PlacementSettings;
@@ -32,6 +31,12 @@ export interface CbbCopilotBridge {
 	getDefaultStylePrompt: () => string;
 	getStylePresets: () => { rigorous: string; relaxed: string };
 	saveStylePrompt: (text: string) => void;
+	/** 已拉取目录的库列表，以及各库是否对模型可见。 */
+	getCatalogAdmin: () => Promise<{ empty: boolean; fetchedAt: number; moduleCount: number; libraries: Array<CatalogLibraryAdmin> }>;
+	/** 手动全量重拉目录并落盘。 */
+	refreshCatalogNow: () => Promise<{ ok: boolean; modules?: number; libraries?: number; error?: string }>;
+	/** 保存当前勾选：未勾选的库对模型不可见。 */
+	saveHiddenLibraryKeys: (keys: Array<string>) => void;
 	/** 注册 Agent 事件监听（每次 chatTurn 实时推送 reasoning/text delta、工具状态、卡片）。重复注册覆盖旧监听。 */
 	onAgentEvent: (sessionId: string, handler: (ev: AgentEvent) => void) => void;
 	/** 中止进行中的 chatTurn（按钮置为停止时的调用）。返回是否有进行中的轮次被中止。 */
@@ -46,7 +51,6 @@ export interface CbbCopilotBridge {
 	testConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }>;
 	/** Jev 链路连通性测试（最小 noul 评估）：校验 Jev baseUrl / Key / model。 */
 	testJevConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }>;
-	getClientEnv: () => Promise<ClientEnv>;
 }
 
 /** 会话 → 事件监听（UI 注册；同一会话只保留最新监听，UI 重载后自动覆盖旧引用）。 */
@@ -62,8 +66,6 @@ function installBridge(): void {
 		saveLlmSettings,
 		getJevSettings,
 		saveJevSettings,
-		getLibraryScope,
-		saveLibraryScope,
 		getLocalLibraryPath,
 		saveLocalLibraryPath,
 		getPlacementSettings,
@@ -72,6 +74,17 @@ function installBridge(): void {
 		getDefaultStylePrompt,
 		getStylePresets,
 		saveStylePrompt,
+		getCatalogAdmin: () => describeCatalogLibraries(),
+		refreshCatalogNow: async () => {
+			try {
+				const stats = await refreshCatalogExclusive();
+				return { ok: true, modules: stats.modules, libraries: stats.libraries };
+			}
+			catch (e) {
+				return { ok: false, error: e instanceof Error ? e.message : String(e) };
+			}
+		},
+		saveHiddenLibraryKeys,
 		onAgentEvent: (sessionId, handler) => {
 			if (typeof handler === 'function')
 				agentEventListeners.set(sessionId, handler);
@@ -101,7 +114,6 @@ function installBridge(): void {
 		selfCheck: () => runSelfCheck(VERSION),
 		testConnection: () => testLlmConnection(),
 		testJevConnection: () => testJevConnection(getJevSettings()),
-		getClientEnv: () => detectClientEnv(),
 	};
 	edaRef.ai_reuse_block_placement = bridge;
 }
@@ -128,7 +140,7 @@ export async function openCopilot(): Promise<void> {
 		catch { /* 回退英文标题 */ }
 		const success = await eda.sys_IFrame.openIFrame(
 			'/iframe/chat.html',
-			440,
+			960,
 			720,
 			'ai-reuse-block-placement',
 			{ title, maximizeButton: true, minimizeButton: true },

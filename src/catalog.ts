@@ -78,11 +78,12 @@ const PAGE_SIZE = 50;
 const MAX_PAGES = 200;
 
 const KIND_ORDER: Array<LibraryKind> = ['personal', 'team', 'local'];
-const KIND_LABELS: Record<LibraryKind, string> = {
-	personal: '个人库',
-	team: '团队库',
-	local: '本地库',
-};
+
+/** 显示名只用宿主给出的 name；没有 name 时用 uuid（本地库的 uuid 就是路径）。 */
+function hostLibraryLabel(name: string | undefined, uuid: string): string {
+	const label = String(name || '').trim();
+	return label || uuid;
+}
 
 interface ResolvedLibrary {
 	kind: LibraryKind;
@@ -133,7 +134,7 @@ async function resolveLibraries(scope: Partial<LibraryScope>, clientMode: Client
 				for (const entry of Array.isArray(all) ? all : []) {
 					if (typeof entry?.uuid === 'string' && entry.uuid && !seenUuids.has(entry.uuid)) {
 						seenUuids.add(entry.uuid);
-						out.push({ kind: 'team', label: entry.name || '团队库', uuid: entry.uuid });
+						out.push({ kind: 'team', label: hostLibraryLabel(entry.name, entry.uuid), uuid: entry.uuid });
 					}
 				}
 			}
@@ -149,7 +150,7 @@ async function resolveLibraries(scope: Partial<LibraryScope>, clientMode: Client
 					const all = typeof getAll === 'function' ? await getAll.call(libsList) : undefined;
 					for (const entry of Array.isArray(all) ? all : []) {
 						if (typeof entry?.uuid === 'string' && entry.uuid)
-							candidates.push({ label: entry.name || '本地库', uuid: entry.uuid });
+							candidates.push({ label: hostLibraryLabel(entry.name, entry.uuid), uuid: entry.uuid });
 					}
 				}
 				catch { /* 走下一级 */ }
@@ -162,7 +163,7 @@ async function resolveLibraries(scope: Partial<LibraryScope>, clientMode: Client
 					const paths = typeof getPaths?.getLibrariesPaths === 'function' ? await getPaths.getLibrariesPaths() : [];
 					for (const p of Array.isArray(paths) ? paths : []) {
 						if (typeof p === 'string' && p)
-							candidates.push({ label: '本地库', uuid: p });
+							candidates.push({ label: p, uuid: p });
 					}
 				}
 				catch { /* 仅全离线可用 */ }
@@ -170,7 +171,7 @@ async function resolveLibraries(scope: Partial<LibraryScope>, clientMode: Client
 			if (!candidates.length) {
 				const fallback = getLocalLibraryPath();
 				if (fallback)
-					candidates.push({ label: '本地库', uuid: fallback });
+					candidates.push({ label: fallback, uuid: fallback });
 			}
 			for (const cand of candidates) {
 				if (seenUuids.has(cand.uuid))
@@ -190,7 +191,7 @@ async function resolveLibraries(scope: Partial<LibraryScope>, clientMode: Client
 		catch { uuid = null; }
 		if (uuid)
 			seenUuids.add(uuid);
-		out.push({ kind, label: KIND_LABELS[kind], uuid });
+		out.push({ kind, label: uuid || '', uuid });
 	}
 	return out;
 }

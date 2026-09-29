@@ -10,8 +10,10 @@
  * 目录检索：search_modules 关键词评分 + get_module 单模块详情，替代整包注入 LLM。
  */
 import type { CatalogFetchReport, CatalogJson, CatalogModule, CatalogStatsView } from '../catalog';
-import { pageSupportOf } from '../catalog';
+import { fetchCatalog, pageSupportOf } from '../catalog';
+import { effectiveLibraryScope } from '../env';
 import { edaGlobal } from '../host';
+import { getHiddenLibraryKeys, libraryVisibilityKey } from '../settings';
 
 /** 存储记录键：v1。结构不兼容时靠 formatVersion 判废重建。 */
 const STORE_KEY = 'catalog_store.v1';
@@ -124,6 +126,67 @@ export async function loadCatalogRecord(): Promise<CatalogStoreRecord | null> {
 	return hit;
 }
 
+/** 模型可见目录：按设置隐藏指定库。存储里的全量目录不变，取消勾选可恢复。 */
+export async function loadModelCatalogRecord(): Promise<CatalogStoreRecord | null> {
+	const rec = await loadCatalogRecord();
+	if (!rec)
+		return null;
+	const hidden = new Set(getHiddenLibraryKeys());
+	if (!hidden.size)
+		return rec;
+	const libraries = rec.catalog.libraries.filter(lib => !hidden.has(libraryVisibilityKey(lib)));
+	let emptyDesc = 0;
+	let modules = 0;
+	for (const lib of libraries) {
+		modules += lib.modules.length;
+		for (const m of lib.modules) {
+			if (!String(m.description || '').trim())
+				emptyDesc++;
+		}
+	}
+	return {
+		...rec,
+		catalog: { ...rec.catalog, libraries },
+		stats: {
+			...rec.stats,
+			libraries: libraries.length,
+			modules,
+			emptyDesc,
+			failed: libraries.filter(lib => lib.failed).length,
+		},
+	};
+}
+
+export interface CatalogLibraryAdmin {
+	key: string;
+	kind: string;
+	name: string;
+	modules: number;
+	failed: boolean;
+	visible: boolean;
+}
+
+/** 设置页用的全量目录：每个库的类型、名称、模块数，以及是否对模型可见。 */
+export async function describeCatalogLibraries(): Promise<{ empty: boolean; fetchedAt: number; moduleCount: number; libraries: Array<CatalogLibraryAdmin> }> {
+	const rec = await loadCatalogRecord();
+	if (!rec)
+		return { empty: true, fetchedAt: 0, moduleCount: 0, libraries: [] };
+	const hidden = new Set(getHiddenLibraryKeys());
+	return {
+		empty: false,
+		fetchedAt: rec.fetchedAt,
+		moduleCount: rec.stats.modules,
+		libraries: rec.catalog.libraries.map(lib => ({
+			key: libraryVisibilityKey(lib),
+			kind: lib.libraryKind,
+			name: lib.moduleName,
+			modules: lib.modules.length,
+			failed: lib.failed,
+			visible: !hidden.has(libraryVisibilityKey(lib)),
+		})),
+	};
+}
+
 /**
  * 写目录记录：内存必写（保证落盘失败时本会话仍可用）；落盘失败带上业务上下文上抛。
  * 抛出的错误经 refresh_catalog 工具错误通道反馈给模型与用户。
@@ -169,6 +232,27 @@ export function catalogStatsOf(report: CatalogFetchReport): CatalogStatsView {
 	};
 }
 
+/**
+ * 手动重拉与 refresh_catalog 共用同一次进行中的拉取。
+ * 后到的一方等待这一次结束，不再并行打宿主接口。
+ */
+let refreshInflight: Promise<CatalogStatsView> | null = null;
+
+export function refreshCatalogExclusive(): Promise<CatalogStatsView> {
+	if (refreshInflight)
+		return refreshInflight;
+	const job = (async () => {
+		const report = await fetchCatalog(await effectiveLibraryScope());
+		return storeCatalog(report);
+	})();
+	refreshInflight = job;
+	void job.finally(() => {
+		if (refreshInflight === job)
+			refreshInflight = null;
+	});
+	return job;
+}
+
 /** 拉取结果落盘：构建记录并写入存储（落盘失败会抛出，见 saveCatalogRecord）。 */
 export async function storeCatalog(report: CatalogFetchReport): Promise<CatalogStatsView> {
 	const stats = catalogStatsOf(report);
@@ -199,7 +283,7 @@ export function flattenCatalog(catalog: CatalogJson): Array<FlatModule> {
 
 /** uuid 反查（O(n) 一次遍历；目录 ≤ 数百条，无需建索引）。 */
 export async function lookupModule(cbbUuid: string): Promise<FlatModule | null> {
-	const rec = await loadCatalogRecord();
+	const rec = await loadModelCatalogRecord();
 	if (!rec)
 		return null;
 	return flattenCatalog(rec.catalog).find(m => m.uuid === cbbUuid) || null;
@@ -263,7 +347,30 @@ export function humanizeAge(ms: number): string {
  * system 注入用的目录摘要（几百 token 级）：统计 + 各库计数 + 新鲜度 + 使用指引。
  * 完整模块数据不进上下文——检索走 search_modules / recommend_modules 分工。
  */
-export function buildCatalogSummaryPayload(rec: CatalogStoreRecord): string {
+export interface HiddenLibraryBrief {
+	name: string;
+	modules: number;
+	failed?: true;
+}
+
+/** 已拉取但用户关掉可见范围的库。模型检索不到这些库里的模块。 */
+export async function hiddenLibraryBriefs(): Promise<Array<HiddenLibraryBrief>> {
+	const rec = await loadCatalogRecord();
+	if (!rec)
+		return [];
+	const hidden = new Set(getHiddenLibraryKeys());
+	if (!hidden.size)
+		return [];
+	return rec.catalog.libraries
+		.filter(lib => hidden.has(libraryVisibilityKey(lib)))
+		.map(lib => ({
+			name: lib.moduleName || lib.libraryUuid,
+			modules: lib.modules.length,
+			failed: lib.failed ? true as const : undefined,
+		}));
+}
+
+export function buildCatalogSummaryPayload(rec: CatalogStoreRecord, hidden: Array<HiddenLibraryBrief> = []): string {
 	const perLib = rec.catalog.libraries.map(l => ({
 		kind: l.libraryKind,
 		name: l.moduleName,
@@ -272,6 +379,7 @@ export function buildCatalogSummaryPayload(rec: CatalogStoreRecord): string {
 		error: l.failed ? (l.error || '拉取失败') : undefined,
 	}));
 	const ageMs = Math.max(0, Date.now() - rec.fetchedAt);
+	const hiddenLibraries = hidden.length ? hidden : undefined;
 	return JSON.stringify({
 		moduleCount: rec.stats.modules,
 		emptyDesc: rec.stats.emptyDesc || undefined,
@@ -280,6 +388,10 @@ export function buildCatalogSummaryPayload(rec: CatalogStoreRecord): string {
 		stale: ageMs > STALE_HINT_MS || undefined,
 		staleHint: ageMs > STALE_HINT_MS ? '目录数据较旧，若用户关心最新模块可调用 refresh_catalog' : undefined,
 		libraries: perLib,
+		hiddenLibraries,
+		visibilityHint: hiddenLibraries
+			? '这些库已经在本地目录里，只是用户关闭了对你的可见范围，所以检索结果里没有。找不到模块时，请用户打开设置里的「模块库目录」，勾选对应库并点「保存可见范围」。不要为此调用 refresh_catalog，也不要建议重新拉取、导入或复制模块。'
+			: undefined,
 		usage: '模块明细不在上下文中。是否已经具体到可以检索，按系统提示【系统提示词】判断。可以检索时：模块名/型号用 search_modules；带具体功能参数的描述用 recommend_modules（query 传用户原始需求整句）。改名称/描述前用 inspect_module，看单个模块详情用 get_module(cbbUuid)，需要最新数据用 refresh_catalog。',
 	});
 }
