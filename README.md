@@ -13,12 +13,12 @@
 
 | 空会话                                          | 对话与放置确认                                            |
 | -------------------------------------------- | -------------------------------------------------- |
-| ![空会话：问候与建议](docs/screenshots/chat-hero.png) | ![对话：候选模块与放置确认卡](docs/screenshots/chat-dialog.png) |
+| ![空会话：问候与建议](images/chat-hero.png) | ![对话：候选模块与放置确认卡](images/chat-dialog.png) |
 
 
 设置页：模型接入、Jev 模型接入、放置排布、系统提示词、模块库目录。
 
-![设置页](docs/screenshots/settings.png)
+![设置页](images/settings.png)
 
 ## 使用
 
