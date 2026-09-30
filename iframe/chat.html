@@ -50,27 +50,10 @@
   #app{display:flex; flex-direction:column; height:100vh;
        background:var(--panel);}
   header{
-    display:flex; align-items:center; gap:14px; padding:0 14px 0 0; height:46px;
+    display:flex; align-items:center; gap:8px; padding:0 8px 0 14px; height:46px;
     border-bottom:1px solid var(--line); background:var(--panel);
     position:sticky; top:0; z-index:5; flex:none;
   }
-  /* ── 顶部标签页（VS Code / Cursor 风格）：单标签承载会话，名称随首条用户消息，× 关闭即新会话 ── */
-  .tabs{display:flex; flex:1; min-width:0; align-self:stretch;}
-  .tab{
-    display:flex; align-items:center; gap:8px; min-width:0; max-width:240px;
-    height:100%; padding:0 7px 0 13px; margin-bottom:-1px;
-    border:1px solid transparent; border-bottom:none;
-    cursor:pointer; user-select:none; color:var(--text-3); font-weight:500; font-size:13px;
-  }
-  .tab:hover{background:var(--hover); color:var(--text-2);}
-  .tab.on{background:var(--panel); border-color:var(--line); color:var(--text); font-weight:600;
-    box-shadow:inset 0 3px 0 var(--blue);}
-  .tab .tab-label{min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-  .tab .tab-close{flex:none; width:18px; height:18px; padding:0; border:none;
-    background:none; color:inherit; opacity:.5; cursor:pointer;
-    display:flex; align-items:center; justify-content:center;}
-  .tab .tab-close svg{width:12px; height:12px; display:block;}
-  .tab .tab-close:hover{background:var(--hover); opacity:1; color:var(--text);}
   /* 扁平线性图标按钮（设置 / 主题），与工具行 SVG 同一视觉语言 */
   .icon-btn{width:30px; height:30px; flex:none; border:none; border-radius:8px;
     background:none; cursor:pointer; color:var(--text-3);
@@ -79,7 +62,7 @@
   .icon-btn svg{display:block; width:17px; height:17px;}
   .icon-btn:hover{background:var(--hover); color:var(--text);}
   .icon-btn.on{color:var(--blue); background:var(--blue-soft);}
-  #hdBtns{display:flex; align-items:center; gap:2px; flex:none;}
+  #hdBtns{display:flex; align-items:center; gap:2px; flex:none; margin-left:auto;}
   /* 右上角状态 chip：常态（真桥 + 模型已配置）不显示，仅异常时出现 */
   .status{display:none; align-items:center; gap:6px; font-size:12px; padding:3px 10px;
     border-radius:12px; white-space:nowrap;}
@@ -344,18 +327,10 @@
 <body>
 <div id="app">
   <header>
-    <nav class="tabs">
-      <div class="tab on" id="chatTab" data-page="chat" title="复用模块助手">
-        <span class="tab-label" id="chatTabLabel">复用模块助手</span>
-        <button class="tab-close" id="chatTabClose" type="button" title="关闭会话（开始新对话）">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        </button>
-      </div>
-    </nav>
     <div class="status" id="status"><span class="dot"></span><span id="statusText"></span></div>
     <div id="hdBtns">
-      <button class="icon-btn" id="clearChatBtn" type="button" title="清空对话（新会话）">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <button class="icon-btn" id="clearChatBtn" type="button" title="清空对话">
+        <svg viewBox="0 0 24 24" fill="none"><path d="m13 11 9-9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M14.6 12.6c.8.8.9 2.1.2 3L10 22l-8-8 6.4-4.8c.9-.7 2.2-.6 3 .2Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="m6.8 10.4 6.8 6.8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="m5 17 1.4-1.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
       <button class="icon-btn" id="settingsBtn" type="button" title="设置">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -919,11 +894,6 @@
   });
   function addUserMsg(text) {
     $('#page-chat').classList.remove('empty'); /* 首条消息后隐藏空会话首屏 */
-    if (!chatTabNamed) { /* 会话标签页名 = 首条用户消息前 8 字（超长加省略号） */
-      chatTabNamed = true;
-      const t = String(text || '').trim().replace(/\s+/g, ' ');
-      if (t) setChatTabTitle(t.length > 8 ? t.slice(0, 8) + '…' : t);
-    }
     curSeg = null; /* 新用户消息开启新分段 */
     const seg = ensureSeg();
     const c = document.createElement('div'); c.className = 'col user';
@@ -1638,14 +1608,12 @@
   }
 
   function switchTab(name) {
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.page === name));
     $('#page-chat').classList.toggle('on', name === 'chat');
     $('#page-settings').classList.toggle('on', name === 'settings');
     const gear = $('#settingsBtn');
     if (gear) gear.classList.toggle('on', name === 'settings');
     if (name === 'settings') renderCatalogAdmin();
   }
-  document.querySelectorAll('.tab').forEach(t => t.onclick = () => switchTab(t.dataset.page));
   $('#settingsBtn').onclick = () => switchTab(
     $('#page-settings').classList.contains('on') ? 'chat' : 'settings');
 
@@ -2096,21 +2064,14 @@
     }
     btn.disabled = false; btn.textContent = '测试连接';
   };
-  /* ── 会话标签页：名称默认「复用模块助手」，首条用户消息后更名；× 关闭 = 新会话 ── */
-  const TAB_DEFAULT_TITLE = '复用模块助手';
-  const chatTabLabel = $('#chatTabLabel');
-  let chatTabNamed = false;
-  const setChatTabTitle = (t) => { chatTabLabel.textContent = t; $('#chatTab').title = t; };
   function resetChat() {
-    if (!confirm('清空当前对话，开始新会话？（目录与设置不受影响）')) return;
+    if (!confirm('清空当前对话？（目录与设置不受影响）')) return;
     try { bridge.resetChatSession(SESSION_ID); } catch (e) {}
     msgList.innerHTML = ''; liveCards.length = 0; curSeg = null;
-    chatTabNamed = false; setChatTabTitle(TAB_DEFAULT_TITLE);
     $('#page-chat').classList.add('empty'); /* 恢复空会话首屏 */
     switchTab('chat');
   }
   $('#clearChatBtn').onclick = resetChat;
-  $('#chatTabClose').onclick = (e) => { e.stopPropagation(); resetChat(); };
 })();
 </script>
 </body>
