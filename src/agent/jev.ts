@@ -80,7 +80,7 @@ async function jevEvaluate(settings: JevSettings, state: string | Record<string,
 	const base = (settings.baseUrl || 'https://api.typesafe.ai/v1').trim().replace(/\/+$/, '');
 	const url = base.endsWith('/systemone') ? base : `${base}/systemone`;
 	if (!settings.apiKey.trim())
-		throw new Error('尚未配置 Jev API Key：请到 设置 → Jev 语义推荐 填入');
+		throw new Error('尚未配置 Jev API Key：请到 设置 → Jev模型接入 填入');
 	const body = {
 		model: (settings.model || 'jev-latest').trim(),
 		state,
@@ -469,7 +469,7 @@ export async function recommendModules(settings: JevSettings, catalogRec: Catalo
 function jevRecoverySpeech(kind: string, message: string): string {
 	switch (kind) {
 		case 'auth':
-			return '鉴权失败——Jev API Key 无效或已过期，请检查 设置 → Jev 语义推荐。';
+			return '鉴权失败——Jev API Key 无效或已过期，请检查 设置 → Jev模型接入。';
 		case 'path':
 			return 'HTTP 404——Jev baseUrl 路径不对，应填到 /v1 这级（如 https://api.typesafe.ai/v1）。';
 		case 'rate':

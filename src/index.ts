@@ -8,7 +8,7 @@ import * as extensionConfig from '../extension.json';
 import { abortSession } from './agent/http';
 import { testJevConnection } from './agent/jev';
 import { cancelCard, chatTurn, confirmEdit, confirmExport, confirmPlace, resetChatSession, testLlmConnection } from './agent/loop';
-import { applyCatalogImport, describeCatalogLibraries, previewCatalogImport, refreshCatalogExclusive } from './agent/store';
+import { applyCatalogImport, describeCatalogLibraries, exportCatalog, previewCatalogImport, refreshCatalogExclusive } from './agent/store';
 import { runSelfCheck } from './env';
 import { edaGlobal } from './host';
 import { getDefaultStylePrompt, getJevSettings, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getStylePresets, getStylePrompt, saveHiddenLibraryKeys, saveJevSettings, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveStylePrompt } from './settings';
@@ -39,6 +39,8 @@ export interface CbbCopilotBridge {
 	previewCatalogImport: (raw: unknown) => Promise<{ ok: boolean; preview?: CatalogImportPreview; error?: string }>;
 	/** 按策略合并进 catalog_store.v1。文件没提到的库保持不变。 */
 	applyCatalogImport: (raw: unknown, policy: CatalogImportPolicy) => Promise<{ ok: boolean; error?: string } & Partial<CatalogImportApplied>>;
+	/** 另存当前勾选的库。未勾选的库不写入文件。 */
+	exportCatalog: (libraryKeys: Array<string>) => Promise<{ ok: boolean; cancelled?: boolean; fileName?: string; modules?: number; libraries?: number; error?: string }>;
 	/** 保存当前勾选：未勾选的库对模型不可见。 */
 	saveHiddenLibraryKeys: (keys: Array<string>) => void;
 	/** 注册 Agent 事件监听（每次 chatTurn 实时推送 reasoning/text delta、工具状态、卡片）。重复注册覆盖旧监听。 */
@@ -100,6 +102,14 @@ function installBridge(): void {
 		applyCatalogImport: async (raw, policy) => {
 			try {
 				return { ok: true, ...await applyCatalogImport(raw, policy) };
+			}
+			catch (e) {
+				return { ok: false, error: e instanceof Error ? e.message : String(e) };
+			}
+		},
+		exportCatalog: async (libraryKeys) => {
+			try {
+				return { ok: true, ...await exportCatalog(libraryKeys) };
 			}
 			catch (e) {
 				return { ok: false, error: e instanceof Error ? e.message : String(e) };

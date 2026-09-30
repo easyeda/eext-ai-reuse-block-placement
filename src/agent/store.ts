@@ -265,6 +265,42 @@ export async function storeCatalog(report: CatalogFetchReport): Promise<CatalogS
 	return stats;
 }
 
+/** 设置页导出：只含当前勾选的库。格式与对话里另存的 CatalogJson 相同。 */
+export async function exportCatalog(libraryKeys: Array<string>): Promise<{ cancelled?: boolean; fileName: string; modules: number; libraries: number }> {
+	const keys = new Set((libraryKeys || []).filter(k => typeof k === 'string' && k));
+	if (!keys.size)
+		throw new Error('请先勾选要导出的库');
+	const rec = await loadCatalogRecord();
+	if (!rec || !rec.catalog.libraries.length)
+		throw new Error('目录还是空的，请先重新拉取');
+	const saveFile = (edaGlobal()?.sys_FileSystem as { saveFile?: (fileData: Blob, fileName?: string) => Promise<void> } | undefined)?.saveFile;
+	if (typeof saveFile !== 'function')
+		throw new Error('sys_FileSystem.saveFile 不可用，无法另存 JSON');
+	const catalog = JSON.parse(JSON.stringify(rec.catalog)) as CatalogJson;
+	catalog.libraries = catalog.libraries.filter(lib => keys.has(libraryVisibilityKey(lib)));
+	if (!catalog.libraries.length)
+		throw new Error('勾选的库不在当前目录里，请先重新拉取');
+	let modules = 0;
+	for (const lib of catalog.libraries)
+		modules += lib.modules.length;
+	catalog.exportedAt = new Date().toISOString();
+	const d = new Date();
+	const pad = (n: number) => String(n).padStart(2, '0');
+	const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+	const fileName = `cbb-catalog-${stamp}.json`;
+	const blob = new Blob([JSON.stringify(catalog, null, '\t')], { type: 'application/json' });
+	try {
+		await saveFile(blob, fileName);
+	}
+	catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		if (/取消|cancel/i.test(msg))
+			return { cancelled: true, fileName, modules, libraries: catalog.libraries.length };
+		throw new Error(`保存 JSON 失败：${msg}`);
+	}
+	return { fileName, modules, libraries: catalog.libraries.length };
+}
+
 // ── 目录 JSON 导入：与当前目录对照后按策略合并 ─────────────────────
 
 export interface CatalogImportPolicy {

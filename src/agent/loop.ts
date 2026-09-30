@@ -363,7 +363,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 					ok: true,
 					available: false,
 					modules: [],
-					hint: 'Jev 语义推荐未配置 API Key（可选增强，不阻塞使用）。请改用 search_modules 关键词检索完成本次需求；可顺带提醒用户：到 设置 → Jev 语义推荐 补充 API Key 后即可启用语义推荐（非必需）。',
+					hint: 'Jev 语义推荐未配置 API Key（可选增强，不阻塞使用）。请改用 search_modules 关键词检索完成本次需求；可顺带提醒用户：到 设置 → Jev模型接入 补充 API Key 后即可启用语义推荐（非必需）。',
 				},
 			};
 		}

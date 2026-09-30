@@ -313,7 +313,8 @@
   .scoperow b{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12.5px;}
   #catalogLibs{flex:1; min-height:0; overflow-y:auto;}
   .scoperow input{flex:none;}
-  #secCatalog .fctl{flex-wrap:wrap;}
+  #secCatalog .fctl{flex-wrap:nowrap; gap:4px;}
+  #secCatalog .fctl .btn{padding:5px 8px; white-space:nowrap; font-size:12px;}
   .import-mask{position:fixed; inset:0; z-index:40; background:rgba(15,23,42,.45);
     display:flex; align-items:center; justify-content:center; padding:16px;}
   .import-mask[hidden]{display:none;}
@@ -468,8 +469,9 @@
         <div class="sec-bd">
           <div class="pnote" id="catalogStatus">尚未拉取模块库目录。</div>
           <div id="catalogLibs"></div>
-          <div class="frow"><label></label><div class="fctl">
+          <div class="frow"><div class="fctl">
             <button class="btn primary" id="btnSaveCatalogVis" type="button">保存可见范围</button>
+            <button class="btn" id="btnExportCatalog" type="button">导出目录</button>
             <button class="btn" id="btnImportCatalog" type="button">导入目录</button>
             <button class="btn danger" id="btnRefreshCatalog" type="button">重新拉取</button>
             <input type="file" id="catalogFile" accept="application/json,.json" hidden>
@@ -695,6 +697,12 @@
     async applyCatalogImport() {
       mockCatalogAdmin.fetchedAt = Date.now();
       return { ok: true, modules: mockCatalogAdmin.moduleCount, libraries: 3, added: 1, conflictsImported: 0, conflictsKept: 1, missingKept: 1, missingDropped: 0, keptIdentical: 2 };
+    },
+    async exportCatalog(keys) {
+      await sleep(200);
+      const selected = new Set(keys || []);
+      const libs = (mockCatalogAdmin.libraries || []).filter(lib => selected.has(lib.key));
+      return { ok: true, fileName: 'cbb-catalog-mock.json', modules: libs.reduce((n, lib) => n + lib.modules, 0), libraries: libs.length };
     },
     async chatTurn(_sid, userText) {
       await sleep(300);
@@ -1993,8 +2001,10 @@
     btn.disabled = true; btn.textContent = '拉取中…';
     const saveBtn = $('#btnSaveCatalogVis');
     const importBtn = $('#btnImportCatalog');
+    const exportBtn = $('#btnExportCatalog');
     if (saveBtn) saveBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
+    if (exportBtn) exportBtn.disabled = true;
     r.className = 'opresult wait';
     r.textContent = '拉取数据可能需要数分钟，请您耐心等待。';
     try {
@@ -2014,6 +2024,43 @@
     btn.disabled = false; btn.textContent = '重新拉取';
     if (saveBtn) saveBtn.disabled = false;
     if (importBtn) importBtn.disabled = false;
+    if (exportBtn) exportBtn.disabled = false;
+  };
+
+  $('#btnExportCatalog').onclick = async () => {
+    const r = $('#catalogResult');
+    const btn = $('#btnExportCatalog');
+    const keys = [...$('#catalogLibs').querySelectorAll('input[data-key]:checked')].map(box => box.dataset.key);
+    if (!keys.length) {
+      r.className = 'opresult err';
+      r.textContent = '请先勾选要导出的库。';
+      return;
+    }
+    if (typeof bridge.exportCatalog !== 'function') {
+      r.className = 'opresult err';
+      r.textContent = '当前版本不能在设置里导出目录。';
+      return;
+    }
+    btn.disabled = true;
+    r.className = 'opresult wait';
+    r.textContent = '正在准备勾选的库…';
+    try {
+      const res = await bridge.exportCatalog(keys);
+      if (res && res.ok && !res.cancelled) {
+        r.className = 'opresult ok';
+        r.textContent = `已导出 ${res.libraries ?? 0} 个库、${res.modules ?? 0} 个模块到 ${res.fileName}。未勾选的库没有写入。`;
+      } else if (res && res.cancelled) {
+        r.className = '';
+        r.textContent = '';
+      } else {
+        r.className = 'opresult err';
+        r.textContent = (res && res.error) || '导出失败';
+      }
+    } catch (e) {
+      r.className = 'opresult err';
+      r.textContent = e.message || String(e);
+    }
+    btn.disabled = false;
   };
 
   $('#saveSettings').onclick = async () => {
