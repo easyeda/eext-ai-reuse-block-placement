@@ -9,8 +9,8 @@
  *
  * 目录检索：search_modules 关键词评分 + get_module 单模块详情，替代整包注入 LLM。
  */
-import type { CatalogFetchReport, CatalogJson, CatalogModule, CatalogStatsView } from '../catalog';
-import { fetchCatalog, pageSupportOf } from '../catalog';
+import type { CatalogFetchReport, CatalogJson, CatalogLibrary, CatalogModule, CatalogStatsView } from '../catalog';
+import { CATALOG_FORMAT_VERSION, CATALOG_GENERATOR, fetchCatalog, pageSupportOf } from '../catalog';
 import { effectiveLibraryScope } from '../env';
 import { edaGlobal } from '../host';
 import { getHiddenLibraryKeys, libraryVisibilityKey } from '../settings';
@@ -263,6 +263,346 @@ export async function storeCatalog(report: CatalogFetchReport): Promise<CatalogS
 		stats,
 	});
 	return stats;
+}
+
+// ── 目录 JSON 导入：与当前目录对照后按策略合并 ─────────────────────
+
+export interface CatalogImportPolicy {
+	/** 同一库、同一 uuid，但名称/描述/分类/图页等不一致。 */
+	onConflict: 'keep' | 'import' | 'newer';
+	/** 文件里有、当前目录没有的模块。 */
+	onAdded: 'add' | 'skip';
+	/** 同一库里当前有、文件里没有的模块。文件完全没提到的库不在此列，始终保留。 */
+	onMissing: 'keep' | 'drop';
+}
+
+export interface CatalogImportItem {
+	name: string;
+	library: string;
+	uuid: string;
+	/** 冲突时不一致的字段。 */
+	fields?: Array<string>;
+}
+
+export interface CatalogImportPreview {
+	identical: number;
+	conflicts: number;
+	added: number;
+	missing: number;
+	fileDuplicates: number;
+	invalid: number;
+	skippedFailedLibraries: number;
+	untouchedLibraries: number;
+	samples: {
+		conflicts: Array<CatalogImportItem>;
+		added: Array<CatalogImportItem>;
+		missing: Array<CatalogImportItem>;
+	};
+}
+
+export interface CatalogImportApplied {
+	keptIdentical: number;
+	conflictsKept: number;
+	conflictsImported: number;
+	added: number;
+	missingKept: number;
+	missingDropped: number;
+	modules: number;
+	libraries: number;
+}
+
+const IMPORT_SAMPLE = 12;
+const LIBRARY_KINDS = new Set(['personal', 'team', 'local']);
+
+interface IndexedLib {
+	key: string;
+	lib: CatalogLibrary;
+	modules: Map<string, CatalogModule>;
+	duplicateUuids: number;
+	invalid: number;
+}
+
+function emptyImportedCatalog(source: CatalogJson['source'] | undefined): CatalogJson {
+	return {
+		formatVersion: CATALOG_FORMAT_VERSION,
+		generator: CATALOG_GENERATOR,
+		exportedAt: new Date().toISOString(),
+		source: source?.app === 'easyeda-pro' ? source : { app: 'easyeda-pro', appVersion: '' },
+		libraries: [],
+	};
+}
+
+/** 接受导出的 CatalogJson，也接受带 catalog 字段的存储记录。格式必须是当前 0.2。 */
+export function parseImportedCatalog(raw: unknown): CatalogJson {
+	if (!raw || typeof raw !== 'object')
+		throw new Error('文件不是 JSON 对象');
+	const obj = raw as Record<string, unknown>;
+	const nested = obj.catalog;
+	const body = nested && typeof nested === 'object' && Array.isArray((nested as CatalogJson).libraries)
+		? nested as CatalogJson
+		: obj as unknown as CatalogJson;
+	if (!Array.isArray(body.libraries))
+		throw new Error('文件里没有 libraries，不是本插件导出的目录 JSON');
+	const ver = String(body.formatVersion || '');
+	if (!ver)
+		throw new Error('文件缺少 formatVersion，无法确认为目录 JSON');
+	if (ver !== COMPAT_FORMAT_VERSION)
+		throw new Error(`目录格式 ${ver} 与当前 ${COMPAT_FORMAT_VERSION} 不兼容`);
+	return body;
+}
+
+function indexCatalog(catalog: CatalogJson): { libs: Map<string, IndexedLib>; invalidLibraries: number } {
+	const libs = new Map<string, IndexedLib>();
+	let invalidLibraries = 0;
+	for (const lib of catalog.libraries) {
+		if (!lib || typeof lib !== 'object' || !LIBRARY_KINDS.has(String(lib.libraryKind))) {
+			invalidLibraries++;
+			continue;
+		}
+		const key = libraryVisibilityKey(lib);
+		let slot = libs.get(key);
+		if (!slot) {
+			slot = { key, lib, modules: new Map(), duplicateUuids: 0, invalid: 0 };
+			libs.set(key, slot);
+		}
+		for (const mod of Array.isArray(lib.modules) ? lib.modules : []) {
+			const uuid = typeof mod?.uuid === 'string' ? mod.uuid.trim() : '';
+			if (!uuid) {
+				slot.invalid++;
+				continue;
+			}
+			if (slot.modules.has(uuid))
+				slot.duplicateUuids++;
+			slot.modules.set(uuid, mod);
+		}
+	}
+	return { libs, invalidLibraries };
+}
+
+function classSig(mod: CatalogModule): string {
+	return [...(mod.classification || [])].map(s => String(s)).sort().join('\u0001');
+}
+
+function boardSig(mod: CatalogModule): string {
+	return (mod.boards || []).map(b => [b.itemType, b.name, b.schematic || '', b.pcb || '', b.parentProjectUuid || ''].join('\u0001')).join('\u0002');
+}
+
+function conflictFields(current: CatalogModule, incoming: CatalogModule): Array<string> {
+	const fields: Array<string> = [];
+	if ((current.name || '') !== (incoming.name || ''))
+		fields.push('名称');
+	if ((current.description || '') !== (incoming.description || ''))
+		fields.push('描述');
+	if (classSig(current) !== classSig(incoming))
+		fields.push('分类');
+	if ((current.updateTimestamp ?? null) !== (incoming.updateTimestamp ?? null))
+		fields.push('更新时间');
+	if ((current.ascription || '') !== (incoming.ascription || ''))
+		fields.push('归属');
+	if ((current.storage || 'cloud') !== (incoming.storage || 'cloud'))
+		fields.push('存储位置');
+	if (boardSig(current) !== boardSig(incoming))
+		fields.push('图页');
+	return fields;
+}
+
+function importIsNewer(current: CatalogModule, incoming: CatalogModule): boolean {
+	const next = incoming.updateTimestamp;
+	const prev = current.updateTimestamp;
+	return typeof next === 'number' && (typeof prev !== 'number' || next > prev);
+}
+
+function takeImport(current: CatalogModule, incoming: CatalogModule, policy: CatalogImportPolicy): boolean {
+	if (policy.onConflict === 'import')
+		return true;
+	if (policy.onConflict === 'newer')
+		return importIsNewer(current, incoming);
+	return false;
+}
+
+function pushSample(list: Array<CatalogImportItem>, item: CatalogImportItem): void {
+	if (list.length < IMPORT_SAMPLE)
+		list.push(item);
+}
+
+function libraryLabel(lib: CatalogLibrary): string {
+	return lib.moduleName || lib.libraryUuid || lib.libraryKind;
+}
+
+/** 失败且没有任何模块的库不参与对照，避免一份空的失败记录把现有模块算成「文件里没有」。 */
+function importLibraryUsable(slot: IndexedLib): boolean {
+	return !(slot.lib.failed && slot.modules.size === 0);
+}
+
+function statsFromCatalog(catalog: CatalogJson): CatalogStatsView {
+	let modules = 0;
+	let emptyDesc = 0;
+	let failed = 0;
+	for (const lib of catalog.libraries) {
+		if (lib.failed)
+			failed++;
+		modules += lib.modules.length;
+		for (const mod of lib.modules) {
+			if (!String(mod.description || '').trim())
+				emptyDesc++;
+		}
+	}
+	return { libraries: catalog.libraries.length, modules, emptyDesc, failed, elapsedMs: 0 };
+}
+
+export async function previewCatalogImport(raw: unknown): Promise<CatalogImportPreview> {
+	const incoming = parseImportedCatalog(raw);
+	const inc = indexCatalog(incoming);
+	const current = await loadCatalogRecord();
+	const cur = indexCatalog(current?.catalog || emptyImportedCatalog(incoming.source));
+	const preview: CatalogImportPreview = {
+		identical: 0,
+		conflicts: 0,
+		added: 0,
+		missing: 0,
+		fileDuplicates: 0,
+		invalid: inc.invalidLibraries,
+		skippedFailedLibraries: 0,
+		untouchedLibraries: 0,
+		samples: { conflicts: [], added: [], missing: [] },
+	};
+	const touched = new Set<string>();
+	for (const [key, slot] of inc.libs) {
+		preview.fileDuplicates += slot.duplicateUuids;
+		preview.invalid += slot.invalid;
+		if (!importLibraryUsable(slot)) {
+			preview.skippedFailedLibraries++;
+			continue;
+		}
+		touched.add(key);
+		const curSlot = cur.libs.get(key);
+		if (!curSlot) {
+			preview.added += slot.modules.size;
+			for (const mod of slot.modules.values())
+				pushSample(preview.samples.added, { name: mod.name || mod.uuid, library: libraryLabel(slot.lib), uuid: mod.uuid });
+			continue;
+		}
+		for (const [uuid, mod] of slot.modules) {
+			const exist = curSlot.modules.get(uuid);
+			if (!exist) {
+				preview.added++;
+				pushSample(preview.samples.added, { name: mod.name || uuid, library: libraryLabel(slot.lib), uuid });
+				continue;
+			}
+			const fields = conflictFields(exist, mod);
+			if (!fields.length) {
+				preview.identical++;
+				continue;
+			}
+			preview.conflicts++;
+			pushSample(preview.samples.conflicts, { name: exist.name || uuid, library: libraryLabel(curSlot.lib), uuid, fields });
+		}
+		for (const [uuid, mod] of curSlot.modules) {
+			if (slot.modules.has(uuid))
+				continue;
+			preview.missing++;
+			pushSample(preview.samples.missing, { name: mod.name || uuid, library: libraryLabel(curSlot.lib), uuid });
+		}
+	}
+	for (const key of cur.libs.keys()) {
+		if (!touched.has(key))
+			preview.untouchedLibraries++;
+	}
+	return preview;
+}
+
+export async function applyCatalogImport(raw: unknown, policy: CatalogImportPolicy): Promise<CatalogImportApplied> {
+	if (!policy || !['keep', 'import', 'newer'].includes(policy.onConflict) || !['add', 'skip'].includes(policy.onAdded) || !['keep', 'drop'].includes(policy.onMissing))
+		throw new Error('导入策略无效');
+	const incoming = parseImportedCatalog(raw);
+	const inc = indexCatalog(incoming);
+	const current = await loadCatalogRecord();
+	const catalog = JSON.parse(JSON.stringify(current?.catalog || emptyImportedCatalog(incoming.source))) as CatalogJson;
+	const base = indexCatalog(catalog);
+	const applied: CatalogImportApplied = {
+		keptIdentical: 0,
+		conflictsKept: 0,
+		conflictsImported: 0,
+		added: 0,
+		missingKept: 0,
+		missingDropped: 0,
+		modules: 0,
+		libraries: 0,
+	};
+	for (const [key, slot] of inc.libs) {
+		if (!importLibraryUsable(slot))
+			continue;
+		let dest = base.libs.get(key);
+		if (!dest) {
+			if (policy.onAdded !== 'add')
+				continue;
+			const shell: CatalogLibrary = {
+				libraryUuid: slot.lib.libraryUuid,
+				libraryKind: slot.lib.libraryKind,
+				moduleName: slot.lib.moduleName,
+				failed: false,
+				error: null,
+				modules: [],
+			};
+			catalog.libraries.push(shell);
+			dest = { key, lib: shell, modules: new Map(), duplicateUuids: 0, invalid: 0 };
+			base.libs.set(key, dest);
+		}
+		for (const [uuid, mod] of slot.modules) {
+			const exist = dest.modules.get(uuid);
+			if (!exist) {
+				if (policy.onAdded !== 'add')
+					continue;
+				const copy = JSON.parse(JSON.stringify(mod)) as CatalogModule;
+				dest.lib.modules.push(copy);
+				dest.modules.set(uuid, copy);
+				applied.added++;
+				continue;
+			}
+			if (!conflictFields(exist, mod).length) {
+				applied.keptIdentical++;
+				continue;
+			}
+			if (!takeImport(exist, mod, policy)) {
+				applied.conflictsKept++;
+				continue;
+			}
+			const copy = JSON.parse(JSON.stringify(mod)) as CatalogModule;
+			const at = dest.lib.modules.findIndex(m => m.uuid === uuid);
+			if (at >= 0)
+				dest.lib.modules[at] = copy;
+			dest.modules.set(uuid, copy);
+			applied.conflictsImported++;
+		}
+		if (policy.onMissing === 'drop') {
+			dest.lib.modules = dest.lib.modules.filter((mod) => {
+				if (slot.modules.has(mod.uuid))
+					return true;
+				applied.missingDropped++;
+				return false;
+			});
+		}
+		else {
+			for (const mod of dest.lib.modules) {
+				if (!slot.modules.has(mod.uuid))
+					applied.missingKept++;
+			}
+		}
+		if (dest.lib.modules.length && dest.lib.failed && !slot.lib.failed) {
+			dest.lib.failed = false;
+			dest.lib.error = null;
+		}
+	}
+	const stats = statsFromCatalog(catalog);
+	await saveCatalogRecord({
+		formatVersion: COMPAT_FORMAT_VERSION,
+		fetchedAt: Date.now(),
+		catalog,
+		stats,
+	});
+	applied.modules = stats.modules;
+	applied.libraries = stats.libraries;
+	return applied;
 }
 
 export function flattenCatalog(catalog: CatalogJson): Array<FlatModule> {

@@ -175,7 +175,7 @@ export const AGENT_TOOLS = [
 	{ name: 'get_module', description: '读取单个模块的完整详情：名称、描述、分类、boards（自带原理图/PCB uuid）、云端/本地存储标记。cbbUuid 必须来自 search_modules。', parameters: GET_MODULE_PARAMS as unknown as Record<string, unknown> },
 	{ name: 'refresh_catalog', description: '重新拉取全部库的模块目录并落盘持久化（首次约 20 秒，库大时可能数分钟）。上下文中的目录摘要标注数据较旧（stale）或用户明确要求刷新时调用；其余情况用 search_modules 即可。调用本工具的同一条回复中，先用正文告诉用户「拉取数据可能需要数分钟，请您耐心等待」，再发起调用。', parameters: REFRESH_CATALOG_PARAMS as unknown as Record<string, unknown> },
 	{ name: 'propose_placement', description: '向用户出示放置确认卡（不会真正放置）。选出匹配模块并给出放置形式（符号或图页）与位置（当前图页 / 新建图页 / 新建板子 / 新建工程）。落点由插件自动排布，无需坐标。', parameters: PROPOSE_PLACEMENT_PARAMS as unknown as Record<string, unknown> },
-	{ name: 'inspect_module', description: '读取模块（个人库/团队库/本地库）自带原理图页的内容摘要：器件清单（位号/名称/器件名/封装）、网络名、文字标注。只读不改画布（本地库通过临时页方式，读取后自动删除）。用于在改名称/描述前自动分析模块功能。', parameters: INSPECT_MODULE_PARAMS as unknown as Record<string, unknown> },
+	{ name: 'inspect_module', description: '读取模块（个人库/团队库/本地库）自带原理图页的内容摘要：器件清单（位号/名称/器件名/封装）、网络名、文字标注。只读不改画布（优先读工程内已有副本；否则经临时板物化读取，读取后自动删除临时内容）。用于在改名称/描述前自动分析模块功能。', parameters: INSPECT_MODULE_PARAMS as unknown as Record<string, unknown> },
 	{ name: 'propose_edit', description: '向用户出示模块名称/描述编辑确认卡（不会真正写库）。', parameters: PROPOSE_EDIT_PARAMS as unknown as Record<string, unknown> },
 	{ name: 'propose_export', description: '向用户出示目录 JSON 导出确认卡（不会真正写文件）。确认后另存一份 JSON，只含勾选模块的目录条目，不含工程文件。按需导出：传 cbbUuids 则卡上只列这些模块（推荐用法，如导出当前推荐方案/用户点名的模块）；仅当用户明确要导出全部目录时才省略 cbbUuids。', parameters: PROPOSE_EXPORT_PARAMS as unknown as Record<string, unknown> },
 	{ name: 'self_check', description: '探测宿主 API 与桥接是否可用，返回诊断文本。', parameters: EMPTY_PARAMS as unknown as Record<string, unknown> },

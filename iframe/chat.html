@@ -270,7 +270,10 @@
     grid-template-rows:auto auto minmax(0,1fr); gap:8px; align-items:stretch;}
   .sec{border:1px solid var(--line); border-radius:var(--radius); background:var(--panel);
     margin-bottom:0; overflow:hidden; display:flex; flex-direction:column; min-height:0;}
-  #secCatalog{min-height:0;}
+  /* 设置页网格：左列 = 放置排布 + 模块库目录（上下两格），右列 = 系统提示词纵向跨两格与之并列 */
+  #secPlacement{grid-column:1; grid-row:2;}
+  #secSys{grid-column:2; grid-row:2 / 4;}
+  #secCatalog{grid-column:1; grid-row:3; min-height:0;}
   .sec-hd{padding:6px 12px; font-weight:600; font-size:12.5px; background:var(--panel-2); border-bottom:1px solid var(--line);
     display:flex; align-items:center; gap:8px; flex:none;}
   .sec-bd{padding:8px 10px; min-height:0;}
@@ -295,7 +298,10 @@
   .pitem input[type=text]{width:96px;}
   .punit{font-size:11px; color:var(--meta);}
   .pnote{font-size:11px; color:var(--meta); margin-top:2px;}
-  #setStyle{width:100%; height:64px; min-height:0; resize:vertical; box-sizing:border-box; margin:0 0 6px; padding:6px 8px;
+  /* 系统提示词：填满跨两格的区块高度，输入框随区块伸缩，禁用手动调高 */
+  #secSys .sec-bd{flex:1; display:flex; flex-direction:column; overflow:hidden;}
+  #secSys .sec-bd > .frow, #secSys .opresult{flex:none;}
+  #setStyle{width:100%; flex:1; min-height:64px; resize:none; box-sizing:border-box; margin:0 0 6px; padding:6px 8px;
     border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text);
     font:12.5px/1.55 Consolas,Menlo,monospace; outline:none;}
   #setStyle:focus{border-color:var(--blue);}
@@ -307,6 +313,22 @@
   .scoperow b{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12.5px;}
   #catalogLibs{flex:1; min-height:0; overflow-y:auto;}
   .scoperow input{flex:none;}
+  #secCatalog .fctl{flex-wrap:wrap;}
+  .import-mask{position:fixed; inset:0; z-index:40; background:rgba(15,23,42,.45);
+    display:flex; align-items:center; justify-content:center; padding:16px;}
+  .import-mask[hidden]{display:none;}
+  .import-card{width:min(560px,100%); max-height:min(560px,100%); overflow:auto;
+    background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:12px; padding:14px 14px 12px;
+    box-shadow:0 16px 40px rgba(15,23,42,.18);}
+  .import-hd{font-weight:650; font-size:14px; margin-bottom:4px;}
+  .import-counts{display:flex; flex-wrap:wrap; gap:6px; margin:8px 0;}
+  .import-counts span{font-size:12px; padding:3px 8px; border-radius:8px; background:var(--panel-2); border:1px solid var(--line);}
+  .import-block{margin:8px 0; font-size:12px; line-height:1.45;}
+  .import-block b{display:block; margin-bottom:2px;}
+  .import-block ul{margin:0; padding-left:18px;}
+  .import-policy{display:flex; flex-direction:column; gap:8px; margin:10px 0; font-size:12.5px;}
+  .import-policy label{display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px;}
+  .import-policy select{padding:4px 8px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit;}
   .scope-badge{flex:none; font-size:11px; padding:2px 8px; border-radius:8px; font-weight:500;}
   .scope-badge.ok{color:var(--green); background:var(--green-soft);}
   .scope-badge.bad{color:var(--red); background:var(--red-soft);}
@@ -412,7 +434,7 @@
           <div class="opresult" id="jevResult"></div>
         </div>
       </div>
-      <div class="sec">
+      <div class="sec" id="secPlacement">
         <div class="sec-hd">放置排布</div>
         <div class="sec-bd">
           <div class="prow">
@@ -429,7 +451,7 @@
           </div>
         </div>
       </div>
-      <div class="sec">
+      <div class="sec" id="secSys">
         <div class="sec-hd">系统提示词</div>
         <div class="sec-bd">
           <textarea id="setStyle" spellcheck="false"></textarea>
@@ -448,7 +470,9 @@
           <div id="catalogLibs"></div>
           <div class="frow"><label></label><div class="fctl">
             <button class="btn primary" id="btnSaveCatalogVis" type="button">保存可见范围</button>
+            <button class="btn" id="btnImportCatalog" type="button">导入目录</button>
             <button class="btn danger" id="btnRefreshCatalog" type="button">重新拉取</button>
+            <input type="file" id="catalogFile" accept="application/json,.json" hidden>
           </div></div>
           <div class="opresult" id="catalogResult"></div>
         </div>
@@ -456,6 +480,42 @@
       </div>
     </section>
   </main>
+  <div id="importMask" class="import-mask" hidden>
+    <div class="import-card" role="dialog" aria-labelledby="importTitle">
+      <div class="import-hd" id="importTitle">导入目录对照</div>
+      <div class="pnote" id="importFileName"></div>
+      <div class="import-counts" id="importCounts"></div>
+      <div id="importLists"></div>
+      <div class="import-policy">
+        <label>重复且内容相同<span class="pnote">跳过，保留现有</span></label>
+        <label>内容冲突
+          <select id="importConflict">
+            <option value="keep">保留现有</option>
+            <option value="import">采用文件</option>
+            <option value="newer">取更新时间较新的</option>
+          </select>
+        </label>
+        <label>文件里多出来的
+          <select id="importAdded">
+            <option value="add">加入目录</option>
+            <option value="skip">不加入</option>
+          </select>
+        </label>
+        <label>同一库里文件没有的
+          <select id="importMissing">
+            <option value="keep">保留现有</option>
+            <option value="drop">从目录移除</option>
+          </select>
+        </label>
+      </div>
+      <div class="pnote">文件没提到的库一律保留。按需导出的 JSON 通常只含一部分模块，移除前先看「文件没有」的数量。</div>
+      <div class="frow" style="margin-top:10px"><label></label><div class="fctl">
+        <button class="btn primary" id="importApply" type="button">按此合并</button>
+        <button class="btn" id="importCancel" type="button">取消</button>
+      </div></div>
+      <div class="opresult" id="importResult"></div>
+    </div>
+  </div>
 </div>
 <script>
 (function () {
@@ -618,6 +678,24 @@
       for (const lib of mockCatalogAdmin.libraries || [])
         lib.visible = !hidden.has(lib.key);
     },
+    async previewCatalogImport() {
+      return {
+        ok: true,
+        preview: {
+          identical: 2, conflicts: 1, added: 1, missing: 1,
+          fileDuplicates: 0, invalid: 0, skippedFailedLibraries: 0, untouchedLibraries: 2,
+          samples: {
+            conflicts: [{ name: 'LDO-3.3', library: 'lib-personal', uuid: 'm1', fields: ['描述'] }],
+            added: [{ name: '新模块', library: 'lib-personal', uuid: 'm-new' }],
+            missing: [{ name: '旧模块', library: 'lib-personal', uuid: 'm-old' }],
+          },
+        },
+      };
+    },
+    async applyCatalogImport() {
+      mockCatalogAdmin.fetchedAt = Date.now();
+      return { ok: true, modules: mockCatalogAdmin.moduleCount, libraries: 3, added: 1, conflictsImported: 0, conflictsKept: 1, missingKept: 1, missingDropped: 0, keptIdentical: 2 };
+    },
     async chatTurn(_sid, userText) {
       await sleep(300);
       const t = String(userText || '');
@@ -693,7 +771,7 @@
         picks = picks.filter(m => m.libraryKind === 'personal').slice(0, 3);
         const token = 'mock-place-' + mockTokenSeq++;
         mockOpenTokens.set(token, 'place');
-        const view = picks.map((p, i) => ({ uuid: p.uuid, libraryUuid: p.libraryUuid, name: p.name, src: p.src, reason: p.reason, pageSupport: p.pageSupport, mode: p.pageSupport ? 'page' : 'symbol', target: 'current' }));
+        const view = picks.map(p => ({ uuid: p.uuid, libraryUuid: p.libraryUuid, name: p.name, src: p.src, reason: p.reason, pageSupport: p.pageSupport, mode: 'symbol', target: 'current' }));
         const card = { type: 'place', token, picks: view, filtered: [] };
         cards.push(card);
         ev({ type: 'card', card });
@@ -1563,14 +1641,24 @@
   $('#settingsBtn').onclick = () => switchTab(
     $('#page-settings').classList.contains('on') ? 'chat' : 'settings');
 
-  const CHIP_PROMPTS = ['现在有哪些模块？', '找一个电源模块并放置', '帮我把模块描述写规范', '导出复用模块索引 JSON'];
+  const CHIP_PROMPTS = ['帮我找5V/3A 降压电源模块', '放置推荐的模块到当前图页', '修改模块的名称和描述', '导出推荐的模块目录json'];
+  /* 建议项点击：只把文案填入输入框，不自动发送——由用户确认后回车或点发送键才真正发出 */
+  function fillComposer(text) {
+    const el = $('#input');
+    el.value = text;
+    el.focus();
+    autosize();
+    syncSendState();
+  }
   CHIP_PROMPTS.forEach(c => { /* 空会话首屏（#chips，居中换行）与对话中建议条（#chipsBar，横滑）共用同一组选项 */
     /* 注意：cloneNode 不复制事件监听器，两处必须各自绑定 onclick（此前 chipsBar 的克隆节点不可点击） */
     const b1 = document.createElement('div'); b1.className = 'chip'; b1.textContent = c;
-    b1.onclick = () => handleUser(c);
+    b1.title = '填入输入框（不自动发送）';
+    b1.onclick = () => fillComposer(c);
     $('#chips').appendChild(b1);
     const b2 = document.createElement('div'); b2.className = 'chip'; b2.textContent = c;
-    b2.onclick = () => handleUser(c);
+    b2.title = '填入输入框（不自动发送）';
+    b2.onclick = () => fillComposer(c);
     $('#chipsBar').appendChild(b2);
   });
   /* 建议条滚轮横滑：滚轮增量优先横向滚动本栏（始终精确到 0 / max，不会截断），
@@ -1781,6 +1869,120 @@
       r.textContent = '保存失败：' + (e.message || String(e));
     }
   };
+  let importPayload = null;
+  function closeImportReview() {
+    importPayload = null;
+    const mask = $('#importMask');
+    if (mask) mask.hidden = true;
+    const file = $('#catalogFile');
+    if (file) file.value = '';
+  }
+  function importSampleList(title, items, total) {
+    if (!items || !items.length) return '';
+    const lis = items.map(it => `<li>${esc(it.library)} / ${esc(it.name || it.uuid)}${it.fields && it.fields.length ? ' · ' + esc(it.fields.join('、')) : ''}</li>`).join('');
+    const more = total > items.length ? `<div class="pnote">还有 ${total - items.length} 条未列出。</div>` : '';
+    return `<div class="import-block"><b>${title}</b><ul>${lis}</ul>${more}</div>`;
+  }
+  function showImportPreview(fileName, preview) {
+    $('#importFileName').textContent = fileName;
+    const bits = [
+      `相同 ${preview.identical}`,
+      `冲突 ${preview.conflicts}`,
+      `文件多出 ${preview.added}`,
+      `文件没有 ${preview.missing}`,
+    ];
+    if (preview.fileDuplicates) bits.push(`文件内重复 ${preview.fileDuplicates}（同库同 uuid 取最后一条）`);
+    if (preview.invalid) bits.push(`无效 ${preview.invalid}`);
+    if (preview.skippedFailedLibraries) bits.push(`跳过失败空库 ${preview.skippedFailedLibraries}`);
+    if (preview.untouchedLibraries) bits.push(`未涉及的库 ${preview.untouchedLibraries}`);
+    $('#importCounts').innerHTML = bits.map(t => `<span>${esc(t)}</span>`).join('');
+    $('#importLists').innerHTML = [
+      importSampleList('内容冲突', preview.samples.conflicts, preview.conflicts),
+      importSampleList('文件里多出来的', preview.samples.added, preview.added),
+      importSampleList('同一库里文件没有的', preview.samples.missing, preview.missing),
+    ].join('');
+    const result = $('#importResult');
+    result.className = '';
+    result.textContent = '';
+    $('#importMask').hidden = false;
+    const apply = $('#importApply');
+    if (apply) apply.disabled = false;
+  }
+  $('#btnImportCatalog').onclick = () => {
+    const r = $('#catalogResult');
+    if (typeof bridge.previewCatalogImport !== 'function') {
+      r.className = 'opresult err';
+      r.textContent = '当前版本不能导入目录。';
+      return;
+    }
+    $('#catalogFile').click();
+  };
+  $('#catalogFile').onchange = async () => {
+    const file = $('#catalogFile').files && $('#catalogFile').files[0];
+    const r = $('#catalogResult');
+    if (!file) return;
+    r.className = 'opresult wait';
+    r.textContent = '正在对照当前目录…';
+    try {
+      const raw = JSON.parse(await file.text());
+      const res = await bridge.previewCatalogImport(raw);
+      if (!res || !res.ok || !res.preview) {
+        r.className = 'opresult err';
+        r.textContent = (res && res.error) || '无法读取这份目录';
+        $('#catalogFile').value = '';
+        return;
+      }
+      importPayload = raw;
+      r.className = '';
+      r.textContent = '';
+      showImportPreview(file.name, res.preview);
+    } catch (e) {
+      r.className = 'opresult err';
+      r.textContent = '不是合法的 JSON：' + (e.message || String(e));
+      $('#catalogFile').value = '';
+    }
+  };
+  $('#importCancel').onclick = () => closeImportReview();
+  $('#importApply').onclick = async () => {
+    const r = $('#importResult');
+    if (!importPayload || typeof bridge.applyCatalogImport !== 'function') {
+      r.className = 'opresult err';
+      r.textContent = '没有可合并的目录。';
+      return;
+    }
+    const btn = $('#importApply');
+    btn.disabled = true;
+    r.className = 'opresult wait';
+    r.textContent = '正在写入目录…';
+    try {
+      const res = await bridge.applyCatalogImport(importPayload, {
+        onConflict: $('#importConflict').value,
+        onAdded: $('#importAdded').value,
+        onMissing: $('#importMissing').value,
+      });
+      if (!res || !res.ok) {
+        r.className = 'opresult err';
+        r.textContent = (res && res.error) || '导入失败';
+        btn.disabled = false;
+        return;
+      }
+      closeImportReview();
+      await refreshSettingsPage();
+      const out = $('#catalogResult');
+      out.className = 'opresult ok';
+      const parts = [`目录现有 ${res.libraries ?? 0} 个库、${res.modules ?? 0} 个模块`];
+      if (res.added) parts.push(`加入 ${res.added}`);
+      if (res.conflictsImported) parts.push(`冲突采用文件 ${res.conflictsImported}`);
+      if (res.conflictsKept) parts.push(`冲突保留现有 ${res.conflictsKept}`);
+      if (res.missingDropped) parts.push(`移除 ${res.missingDropped}`);
+      if (res.missingKept) parts.push(`文件没有但保留 ${res.missingKept}`);
+      out.textContent = parts.join('，') + '。';
+    } catch (e) {
+      r.className = 'opresult err';
+      r.textContent = e.message || String(e);
+      btn.disabled = false;
+    }
+  };
   $('#btnRefreshCatalog').onclick = async () => {
     const r = $('#catalogResult');
     const btn = $('#btnRefreshCatalog');
@@ -1790,7 +1992,9 @@
     }
     btn.disabled = true; btn.textContent = '拉取中…';
     const saveBtn = $('#btnSaveCatalogVis');
+    const importBtn = $('#btnImportCatalog');
     if (saveBtn) saveBtn.disabled = true;
+    if (importBtn) importBtn.disabled = true;
     r.className = 'opresult wait';
     r.textContent = '拉取数据可能需要数分钟，请您耐心等待。';
     try {
@@ -1809,6 +2013,7 @@
     }
     btn.disabled = false; btn.textContent = '重新拉取';
     if (saveBtn) saveBtn.disabled = false;
+    if (importBtn) importBtn.disabled = false;
   };
 
   $('#saveSettings').onclick = async () => {

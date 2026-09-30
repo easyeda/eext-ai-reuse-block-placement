@@ -2,13 +2,13 @@
  * 扩展入口 + iframe 桥。UI 在 iframe/chat.html；写画布/写库/导出必须走确认卡令牌。
  */
 import type { AgentEvent, CatalogStatsView, ChatTurnResult, PlaceCbbItem } from './agent/loop';
-import type { CatalogLibraryAdmin } from './agent/store';
+import type { CatalogImportApplied, CatalogImportPolicy, CatalogImportPreview, CatalogLibraryAdmin } from './agent/store';
 import type { JevSettings, LlmSettings, PlacementSettings } from './settings';
 import * as extensionConfig from '../extension.json';
 import { abortSession } from './agent/http';
 import { testJevConnection } from './agent/jev';
 import { cancelCard, chatTurn, confirmEdit, confirmExport, confirmPlace, resetChatSession, testLlmConnection } from './agent/loop';
-import { describeCatalogLibraries, refreshCatalogExclusive } from './agent/store';
+import { applyCatalogImport, describeCatalogLibraries, previewCatalogImport, refreshCatalogExclusive } from './agent/store';
 import { runSelfCheck } from './env';
 import { edaGlobal } from './host';
 import { getDefaultStylePrompt, getJevSettings, getLlmSettings, getLocalLibraryPath, getPlacementSettings, getStylePresets, getStylePrompt, saveHiddenLibraryKeys, saveJevSettings, saveLlmSettings, saveLocalLibraryPath, savePlacementSettings, saveStylePrompt } from './settings';
@@ -35,6 +35,10 @@ export interface CbbCopilotBridge {
 	getCatalogAdmin: () => Promise<{ empty: boolean; fetchedAt: number; moduleCount: number; libraries: Array<CatalogLibraryAdmin> }>;
 	/** 手动全量重拉目录并落盘。 */
 	refreshCatalogNow: () => Promise<{ ok: boolean; modules?: number; libraries?: number; error?: string }>;
+	/** 对照当前目录，不写存储。raw 为导出的目录 JSON（或带 catalog 字段的存储记录）。 */
+	previewCatalogImport: (raw: unknown) => Promise<{ ok: boolean; preview?: CatalogImportPreview; error?: string }>;
+	/** 按策略合并进 catalog_store.v1。文件没提到的库保持不变。 */
+	applyCatalogImport: (raw: unknown, policy: CatalogImportPolicy) => Promise<{ ok: boolean; error?: string } & Partial<CatalogImportApplied>>;
 	/** 保存当前勾选：未勾选的库对模型不可见。 */
 	saveHiddenLibraryKeys: (keys: Array<string>) => void;
 	/** 注册 Agent 事件监听（每次 chatTurn 实时推送 reasoning/text delta、工具状态、卡片）。重复注册覆盖旧监听。 */
@@ -85,6 +89,22 @@ function installBridge(): void {
 			}
 		},
 		saveHiddenLibraryKeys,
+		previewCatalogImport: async (raw) => {
+			try {
+				return { ok: true, preview: await previewCatalogImport(raw) };
+			}
+			catch (e) {
+				return { ok: false, error: e instanceof Error ? e.message : String(e) };
+			}
+		},
+		applyCatalogImport: async (raw, policy) => {
+			try {
+				return { ok: true, ...await applyCatalogImport(raw, policy) };
+			}
+			catch (e) {
+				return { ok: false, error: e instanceof Error ? e.message : String(e) };
+			}
+		},
 		onAgentEvent: (sessionId, handler) => {
 			if (typeof handler === 'function')
 				agentEventListeners.set(sessionId, handler);

@@ -17,7 +17,14 @@ import { edaGlobal, fmtErr, sleep, withTimeout } from './host';
 
 const PLACE_TIMEOUT_MS = 30000;
 const MODIFY_TIMEOUT_MS = 20000;
-const PAGE_SWITCH_TIMEOUT_MS = 8000;
+/** 切页后等待激活的预算：openDocument 返回后画布激活仍可能滞后，从 8s 放宽到 15s。 */
+const PAGE_SWITCH_TIMEOUT_MS = 15000;
+/** 预测量打开模块自带页的等待预算：打不开要快速降级，不占全额切页预算。 */
+const PREMEASURE_OPEN_WAIT_MS = 8000;
+/** 新建板子后其原理图页同步进板信息的等待预算（实测 2026-09-30 可超 12s 才出现）。 */
+const BOARD_PAGE_WAIT_MS = 30000;
+/** 新建板子后板子行本身出现在 getAllBoardsInfo 的等待预算（板行比图页同步快，失败时不必干等满额切页预算）。 */
+const BOARD_APPEAR_WAIT_MS = 10000;
 const SAVE_TIMEOUT_MS = 20000;
 /** EDMT_EditorDocumentType：原理图页 / PCB / 面板，对应 sch|pcb|pnl_Document.save。 */
 const DOC_SCHEMATIC_PAGE = 1;
@@ -121,23 +128,27 @@ function assertPlaceableLibrary(libraryUuid: string): void {
 		throw new Error('工程库中的条目是放置时自动生成的工程内嵌副本，不支持放置与编辑。请对个人库或本地库中的原模块操作。');
 }
 
-export async function activateSchematicPage(pageUuid: string): Promise<void> {
+/**
+ * 打开并激活目标原理图页。成败只看激活状态，不看 openDocument 的返回值——宿主实测（2026-09-30）
+ * 该接口打开成功时也恒返回 undefined，旧实现按返回值判失败，导致每次切页都误报「打开图页失败」
+ * （inspect_module 读取、新建图页/板子放置、切回原文档全数中招，是普遍性而非个别模块问题）。
+ * waitMs 仅限「目标可能根本无法激活」的调用方（如预测量打开库侧自带页）收紧等待预算用。
+ */
+export async function activateSchematicPage(pageUuid: string, waitMs = PAGE_SWITCH_TIMEOUT_MS): Promise<void> {
 	const editor = edaGlobal()?.dmt_EditorControl as
 		| { openDocument?: (documentUuid: string) => Promise<string | undefined> }
 		| undefined;
 	if (typeof editor?.openDocument !== 'function')
 		throw new Error('dmt_EditorControl.openDocument 不可用，无法切换图页');
-	const tabId = await withTimeout(editor.openDocument(pageUuid), 15000, '打开图页超时');
-	if (!tabId)
-		throw new Error('打开图页失败');
-	const deadline = Date.now() + PAGE_SWITCH_TIMEOUT_MS;
+	await withTimeout(editor.openDocument(pageUuid), 15000, '打开图页超时');
+	const deadline = Date.now() + waitMs;
 	while (Date.now() < deadline) {
 		const state = await getCurrentDocState();
 		if (state.ok && state.uuid === pageUuid)
 			return;
 		await sleep(200);
 	}
-	throw new Error('切换图页后未能激活目标原理图页，请手动打开后重试');
+	throw new Error('打开图页失败：目标图页未能激活（图页不存在或不属于当前工程时会发生），请手动打开后重试');
 }
 
 async function openNewSchematicPage(): Promise<{ pageUuid: string; pageName: string }> {
@@ -188,14 +199,23 @@ async function firstPageFromSchematic(schematic: { uuid?: string; page?: Array<{
 	return { pageUuid: first.uuid, pageName: typeof first.name === 'string' ? first.name : '' };
 }
 
+/**
+ * 打开新建板子的原理图页。图页同步进板信息可能明显滞后（实测 2026-09-30：createBoard 后
+ * getBoardInfo 的图页列表 12s 后仍为空），等待预算放宽到 30s，并双源兜底——
+ * getBoardInfo 取不到时扫 getAllBoardsInfo（同日实测图页更早出现在该列表里）。
+ */
 async function openBoardSchematicPage(boardName: string): Promise<{ pageUuid: string; pageName: string }> {
+	interface BoardSchematicInfo { uuid?: string; page?: Array<{ uuid?: string; name?: string }> }
 	const boardApi = edaGlobal()?.dmt_Board as
-		| { getBoardInfo?: (boardName: string) => Promise<{ name?: string; schematic?: { uuid?: string; page?: Array<{ uuid?: string; name?: string }> } } | null> }
+		| {
+			getBoardInfo?: (boardName: string) => Promise<{ name?: string; schematic?: BoardSchematicInfo } | null>;
+			getAllBoardsInfo?: () => Promise<Array<{ name?: string; schematic?: BoardSchematicInfo }>>;
+		}
 		| undefined;
 	const getInfo = boardApi?.getBoardInfo;
 	if (typeof getInfo !== 'function')
 		throw new Error('dmt_Board.getBoardInfo 不可用，无法打开新建板子的原理图');
-	const deadline = Date.now() + 12000;
+	const deadline = Date.now() + BOARD_PAGE_WAIT_MS;
 	while (Date.now() < deadline) {
 		try {
 			const info = await withTimeout(getInfo.call(boardApi, boardName), 8000, '读取板子信息超时');
@@ -203,7 +223,17 @@ async function openBoardSchematicPage(boardName: string): Promise<{ pageUuid: st
 			if (page)
 				return page;
 		}
-		catch { /* 板子刚创建时可能尚未同步 */ }
+		catch { /* 板子刚创建时可能尚未同步，或目标页暂不可激活 */ }
+		if (typeof boardApi?.getAllBoardsInfo === 'function') {
+			try {
+				const rows = (await withTimeout(boardApi.getAllBoardsInfo(), 8000, '读取板子列表超时')) || [];
+				const hit = rows.find(r => String(r?.name || '') === boardName);
+				const page = await firstPageFromSchematic(hit?.schematic);
+				if (page)
+					return page;
+			}
+			catch { /* 兜底源同样可能未同步 */ }
+		}
 		await sleep(300);
 	}
 	throw new Error('新建板子后未能打开原理图页，请手动打开后再放置');
@@ -221,15 +251,74 @@ async function openNewBoardAndSchematic(): Promise<{ pageUuid: string; pageName:
 	if (!current?.uuid)
 		throw new Error('当前没有打开的工程，无法新建板子。请先打开工程，或改用「新建工程」。');
 	const boardApi = edaGlobal()?.dmt_Board as
-		| { createBoard?: (schematicUuid?: string, pcbUuid?: string) => Promise<string | undefined> }
+		| {
+			createBoard?: (schematicUuid?: string, pcbUuid?: string) => Promise<string | undefined>;
+			getAllBoardsInfo?: () => Promise<Array<{ name?: string; uuid?: string }>>;
+		}
 		| undefined;
 	const createBoard = boardApi?.createBoard;
 	if (typeof createBoard !== 'function')
 		throw new Error('dmt_Board.createBoard 不可用（宿主版本过低或不支持）');
-	const boardName = await withTimeout(createBoard.call(boardApi), 20000, '新建板子超时');
+	// createBoard 成功时也常只返回 undefined（与 openDocument 同类，宿主 2026-09-30 实测）。
+	// 旧实现拿返回值当成功判据，导致板子其实已建好却误报「未返回板子名」，对所有模块普遍触发。
+	// 改为「返回值优先 + 新增板 diff 兜底」：新建前后扫全量板列表，从新增行取板名，不再依赖返回值。
+	const before = await snapshotBoardUuids(boardApi);
+	let returnedName = '';
+	try {
+		const ret = await withTimeout(createBoard.call(boardApi), 20000, '新建板子超时');
+		if (typeof ret === 'string')
+			returnedName = ret.trim();
+	}
+	catch (e) {
+		throw new Error(`新建板子失败：${fmtErr(e)}`);
+	}
+	const boardName = await resolveNewBoardName(boardApi, before, returnedName);
 	if (!boardName)
-		throw new Error('新建板子未成功（未返回板子名）');
+		throw new Error('新建板子未成功（工程中未出现新板子）');
 	return openBoardSchematicPage(boardName);
+}
+
+/** 扫全量板列表的 uuid 集合；接口缺失/异常返回空集，供新建前后 diff 兜底。 */
+async function snapshotBoardUuids(boardApi: { getAllBoardsInfo?: () => Promise<Array<{ uuid?: string }>> } | undefined): Promise<Set<string>> {
+	if (typeof boardApi?.getAllBoardsInfo !== 'function')
+		return new Set();
+	try {
+		const rows = (await withTimeout(boardApi.getAllBoardsInfo(), 8000, '读取板子列表超时')) || [];
+		return new Set(rows.map(r => String(r?.uuid || '')).filter(u => u));
+	}
+	catch {
+		return new Set();
+	}
+}
+
+/**
+ * 解析新建板子的板名：优先用 createBoard 的返回值（部分宿主会返回板名）；
+ * 否则轮询全量板列表，取 uuid 不在 before 里的新增行的 name。都取不到返回空串（调用方判失败）。
+ */
+async function resolveNewBoardName(
+	boardApi: { getAllBoardsInfo?: () => Promise<Array<{ name?: string; uuid?: string }>> } | undefined,
+	before: Set<string>,
+	returnedName: string,
+): Promise<string> {
+	if (returnedName)
+		return returnedName;
+	if (typeof boardApi?.getAllBoardsInfo !== 'function')
+		return '';
+	const deadline = Date.now() + BOARD_APPEAR_WAIT_MS;
+	while (Date.now() < deadline) {
+		try {
+			const rows = (await withTimeout(boardApi.getAllBoardsInfo(), 8000, '读取板子列表超时')) || [];
+			const hit = rows.find((r) => {
+				const u = String(r?.uuid || '');
+				return Boolean(u && !before.has(u) && String(r?.name || ''));
+			});
+			if (hit)
+				return String(hit.name);
+		}
+		catch { /* 刚建板时列表可能尚未同步 */ }
+		await sleep(300);
+	}
+	return '';
 }
 
 async function resolveFallbackTeamUuid(): Promise<string | undefined> {
@@ -558,8 +647,8 @@ export function estimateGeometry(): CachedGeometry {
  */
 export async function premeasureGeometry(libraryUuid: string, cbbUuid: string): Promise<CachedGeometry | null> {
 	assertPlaceableLibrary(libraryUuid);
-	// 本地模块的自带页属于磁盘工程，未在客户端打开时 openDocument 无法按 uuid 激活（与云端模块
-	// 「打开图页失败」同类），预测量跳过：首放置走保守估计，放置后实测回写缓存，之后即精确。
+	// 本地模块的自带页属于磁盘工程，未在客户端打开时无法按 uuid 激活，预测量跳过：
+	// 首放置走保守估计，放置后实测回写缓存，之后即精确。
 	if (isLocalLibraryUuid(libraryUuid))
 		return null;
 	const origin = await getCurrentDocState();
@@ -567,7 +656,8 @@ export async function premeasureGeometry(libraryUuid: string, cbbUuid: string): 
 		return null;
 	const cbbPageUuid = await getCbbPageUuid(cbbUuid, libraryUuid);
 	// 打开模块自带页 → 等图元落盘 → 量全图元 → 必须切回原页，否则后续放置落错页。
-	await activateSchematicPage(cbbPageUuid);
+	// 库侧自带页可能无法激活（如宿主不支持打开库侧原理图）：用收紧的等待预算快速降级，不拖慢放置。
+	await activateSchematicPage(cbbPageUuid, PREMEASURE_OPEN_WAIT_MS);
 	try {
 		await sleep(500);
 		const ids = await listPagePrimitiveIdsDetailed();
@@ -1131,6 +1221,8 @@ const SUMMARY_MAX_NETS = 60;
 const SUMMARY_MAX_TEXTS = 30;
 const SUMMARY_MAX_TEXT_LEN = 120;
 const SUMMARY_READ_TIMEOUT_MS = 15000;
+/** 物化放置（读取用）超时：多板模块实测 25s 级才落完副本板，比常规放置给更长预算。 */
+const PLACE_READ_TIMEOUT_MS = 60000;
 /** ESCH_PrimitiveComponentType（字符串枚举）：普通器件。 */
 const SCH_COMP_PART = 'part';
 /** 反映对外连接的组件类型：网络标志 / 网络端口 / 离图连接器。 */
@@ -1155,39 +1247,112 @@ async function restoreOriginDocument(origin: DocState): Promise<void> {
 }
 
 /**
- * 读取模块自带原理图页内容（只读）：打开模块页 → 读器件/网络/文字 → 切回原文档。
- * 与 premeasureGeometry 同一安全模式。
- * 三源统一入口：
- * - 云端模块（个人库/团队库）：激活 lib_Cbb.get().boards[].schematic 自带页后读取，无残留。
- * - 本地库模块：宿主 lib_Cbb.get 对本地模块未实现（必崩），且 .eprj2 内容加密无法离线解析——
- *   走放置读取路径：placeCbbSchematicPage 会新建一个专属板子承载模块内容（并非放入活动页），
- *   读摘要后删除新板子的全部图页——宿主在末页删除后自动移除空板（实测 2026-09-16，21 个残留板清零）。
- *   已知无法消除的副作用：每次放置仍会向工程库写入一个 CBB 副本（与正常放置相同，宿主行为）。
+ * 读取模块自带原理图页内容（只读）：读器件/网络/文字摘要后切回原文档。三源统一入口（个人/团队/本地库同路径）。
+ * 不直接「激活模块自带页」：boards[].schematic 是库侧原理图 uuid（非工程内图页 uuid），本地库模块还须走
+ * .eprj2 解析，统一改走两条路径读取：
+ * - 快路径（零副作用）：工程里已有该模块的 CBB 副本（放置时宿主自动生成）时，直接打开副本板的图页读取。
+ *   任一环节失败不判死，退化到物化路径再试。
+ * - 物化路径：自建临时板并激活其页 → placeCbbSchematicPage 把模块内容落到调用时的活动图页（宿主行为，
+ *   实测 2026-09-30：内容落在活动页、不切换活动页、并新建"模块名_N"副本板承载原样拷贝）→ 读摘要 →
+ *   切回原文档 → 删除新产生的板子（临时板 + 副本板；deleteBoard 优先、删页兜底、两轮清迟到板）。
+ *   本地库模块 lib_Cbb.get 必崩（TypeError: parent_tag）且 .eprj2 加密，sheet uuid 走 readLocalSheetUuid
+ *   的明文工程树解析；云端直接取 boards[].schematic（实测 placeCbbSchematicPage 用它放置返回 true）。
+ * 已知无法消除的副作用：每次物化会向工程库写入一个 CBB 副本（与正常放置相同，宿主行为）。
  */
 export async function readCbbSchematicSummary(libraryUuid: string, cbbUuid: string, moduleName = ''): Promise<CbbSchematicSummary> {
+	assertPlaceableLibrary(libraryUuid);
 	const origin = await getCurrentDocState();
-	if (isLocalLibraryUuid(libraryUuid)) {
-		const boardsBefore = await listBoardUuids();
-		const pageUuid = await placeOnTempPageForRead(libraryUuid, cbbUuid, moduleName);
+	const copyPage = await findCbbCopyPageUuid(cbbUuid);
+	let fastErr: unknown = null;
+	if (copyPage) {
 		try {
-			return await readActivePageSummary(pageUuid);
+			await activateSchematicPage(copyPage);
+			try {
+				return await readActivePageSummary(copyPage);
+			}
+			finally {
+				await restoreOriginDocument(origin);
+			}
 		}
-		finally {
-			// 清理放置新产生的板子（删其全部图页，宿主自动移除空板）后切回原文档；
-			// 切回失败若读取成功不算硬错误。
-			await deleteBoardsCreatedAfter(boardsBefore);
-			await restoreOriginDocument(origin);
+		catch (e) {
+			// 快路径任一环节失败（副本页打不开/读不到、切回失败）都不判死，退化到物化路径再试一次。
+			fastErr = e;
 		}
 	}
-	assertPlaceableLibrary(libraryUuid);
-	const pageUuid = await getCbbPageUuid(cbbUuid, libraryUuid);
-	await activateSchematicPage(pageUuid);
+	const boardsBefore = await listBoardUuids();
 	try {
-		return await readActivePageSummary(pageUuid);
+		let tempPage = '';
+		try {
+			tempPage = (await openNewBoardAndSchematic()).pageUuid;
+		}
+		catch (e) {
+			throw new Error(`无法自建临时图页读取模块原理图：${fmtErr(e)}`);
+		}
+		const sheetUuid = isLocalLibraryUuid(libraryUuid)
+			? await readLocalSheetUuid(libraryUuid, cbbUuid, moduleName)
+			: await getCbbPageUuid(cbbUuid, libraryUuid);
+		await placeCbbSheetForRead(libraryUuid, cbbUuid, sheetUuid);
+		// 内容落在调用时的活动图页（自建临时页），读活动页即读到模块内容。
+		const activeUuid = (await getCurrentDocState()).uuid || tempPage;
+		let summary = await readActivePageSummary(activeUuid);
+		// 保险：宿主版本差异导致活动页为空时（内容只落到副本板、或落到临时页但活动页被切换），
+		// 逐个候选页补读，取首个非空摘要。
+		if (!summary.deviceCount && !summary.nets.length && !summary.texts.length) {
+			for (const candidate of [tempPage, await findCbbCopyPageUuid(cbbUuid)]) {
+				if (!candidate || candidate === activeUuid)
+					continue;
+				await activateSchematicPage(candidate);
+				const s = await readActivePageSummary(candidate);
+				if (s.deviceCount || s.nets.length || s.texts.length) {
+					summary = s;
+					break;
+				}
+			}
+		}
+		return summary;
+	}
+	catch (e) {
+		// 两条路径都失败时把快路径的失败原因一并带上，便于区分「副本页打不开」与「物化失败」。
+		if (fastErr !== null)
+			throw new Error(`读取模块原理图失败（副本页路径：${fmtErr(fastErr)}；临时页物化路径：${fmtErr(e)}）`);
+		throw e;
 	}
 	finally {
-		await restoreOriginDocument(origin);
+		// 切回原文档后删板（避免删除活动文档）；清理不被切回异常跳过，否则物化副产品残留工程。
+		try {
+			await restoreOriginDocument(origin);
+		}
+		finally {
+			await deleteBoardsCreatedAfter(boardsBefore);
+		}
 	}
+}
+
+/**
+ * 工程里已有的该模块 CBB 副本图页：放置时宿主自动生成"模块名_N"板（内容为模块原样拷贝），
+ * 其页可直接打开读取，零副作用。找不到返回 null（首次读取走物化路径）。多板模块有多份副本时
+ * 取第一份——读取范围同为单页，与物化路径的 boards[0] 口径一致量级。
+ */
+async function findCbbCopyPageUuid(cbbUuid: string): Promise<string | null> {
+	const sch = edaGlobal()?.dmt_Schematic as
+		| { getAllSchematicsInfo?: () => Promise<Array<Record<string, unknown>>> }
+		| undefined;
+	if (typeof sch?.getAllSchematicsInfo !== 'function')
+		return null;
+	try {
+		const rows = (await withTimeout(sch.getAllSchematicsInfo(), 15000, '读取工程原理图列表超时')) || [];
+		for (const row of rows) {
+			const sym = row.cbbSymbol as { cbbUuid?: unknown } | undefined;
+			if (!sym || typeof sym.cbbUuid !== 'string' || sym.cbbUuid !== cbbUuid)
+				continue;
+			const pages = Array.isArray(row.page) ? (row.page as Array<{ uuid?: unknown }>) : [];
+			const pageUuid = pages.map(p => String(p?.uuid || '')).find(u => u);
+			if (pageUuid)
+				return pageUuid;
+		}
+	}
+	catch { /* 查不到副本不阻塞，走物化路径 */ }
+	return null;
 }
 
 /** 本地库路径特征：resolveLibraries 的 local 候选是磁盘路径（盘符/UNC），云端库 uuid 是十六进制串。 */
@@ -1212,51 +1377,70 @@ async function listBoardUuids(): Promise<Set<string>> {
 }
 
 /**
- * 删除放置新产生的板子：对每个新板子删除其全部图页——宿主在末页删除后自动移除空板（实测 2026-09-16，
- * 21 个残留板清到 0）。deleteBoard 本身在此宿主版本为 no-op（恒返回 false），不能直接用。
+ * 清理放置新产生的板子（自建临时板 + 宿主副产品副本板）：优先 deleteBoard 整板删除（实测 2026-09-30
+ * 返回 true 可删，含空板）；失败回退删除其全部图页——宿主在末页删除后自动移除空板（实测 2026-09-16）。
+ * 删完等一拍再清一轮，兜底多板模块异步迟到的副本板（实测 25s 级陆续生成）。
  * 返回成功清理的板子数。
  */
 async function deleteBoardsCreatedAfter(before: Set<string>): Promise<number> {
+	let cleaned = await deleteNewBoardsOnce(before);
+	await sleep(800);
+	cleaned += await deleteNewBoardsOnce(before);
+	return cleaned;
+}
+
+/** 一轮清理：删除快照之后新出现的板子。deleteBoard 优先、删页兜底；两者都未成功不计数。 */
+async function deleteNewBoardsOnce(before: Set<string>): Promise<number> {
 	const b = edaGlobal()?.dmt_Board as
-		| { getAllBoardsInfo?: () => Promise<Array<Record<string, unknown>>> }
+		| { getAllBoardsInfo?: () => Promise<Array<Record<string, unknown>>>; deleteBoard?: (boardName: string) => Promise<boolean> }
 		| undefined;
 	const sch = edaGlobal()?.dmt_Schematic as
 		| { deleteSchematicPage?: (pageUuid: string) => Promise<boolean> }
 		| undefined;
-	if (typeof b?.getAllBoardsInfo !== 'function' || typeof sch?.deleteSchematicPage !== 'function')
+	if (typeof b?.getAllBoardsInfo !== 'function')
 		return 0;
 	const rows = (await b.getAllBoardsInfo()) || [];
 	const newBoards = rows.filter(r => !before.has(String(r.uuid)));
 	let cleaned = 0;
 	for (const nb of newBoards) {
-		const schematic: unknown = nb.schematic;
-		const pages = schematic && typeof schematic === 'object' && Array.isArray((schematic as { page?: unknown }).page)
-			? ((schematic as { page: Array<{ uuid?: unknown }> }).page).map(p => String(p.uuid ?? '')).filter(u => u)
-			: [];
-		let allDeleted = true;
-		for (const pUuid of pages) {
+		let done = false;
+		const name = String(nb.name || '');
+		if (name && typeof b.deleteBoard === 'function') {
 			try {
-				const r = await withTimeout(sch.deleteSchematicPage(pUuid), 10000, '删除图页超时');
-				if (r !== true)
-					allDeleted = false;
+				done = (await withTimeout(b.deleteBoard(name), 10000, '删除板子超时')) === true;
 			}
-			catch {
-				allDeleted = false;
+			catch { done = false; }
+		}
+		if (!done && typeof sch?.deleteSchematicPage === 'function') {
+			const schematic: unknown = nb.schematic;
+			const pages = schematic && typeof schematic === 'object' && Array.isArray((schematic as { page?: unknown }).page)
+				? ((schematic as { page: Array<{ uuid?: unknown }> }).page).map(p => String(p.uuid ?? '')).filter(u => u)
+				: [];
+			if (pages.length) {
+				done = true;
+				for (const pUuid of pages) {
+					try {
+						const r = await withTimeout(sch.deleteSchematicPage(pUuid), 10000, '删除图页超时');
+						if (r !== true)
+							done = false;
+					}
+					catch {
+						done = false;
+					}
+				}
 			}
 		}
-		if (allDeleted)
+		if (done)
 			cleaned++;
 	}
 	return cleaned;
 }
 
 /**
- * 本地库读取：.eprj2 明文工程树解析 sheet uuid → placeCbbSchematicPage 放置（宿主新建专属板子承载
- * 模块内容并自动激活其页，并非放入活动页）→ 返回激活的页 uuid。调用方读取后清理新板子（删其全部
- * 图页，宿主自动移除空板）。半离线模式实测（2026-09-15/16）：放置返回 true，器件可读，删页后零残留。
+ * 物化路径放置：placeCbbSchematicPage 把 sheet 内容落到调用时的活动图页（调用方自建的临时页）原点，
+ * 由调用方读取活动页摘要并清理新板子。读取场景给更长超时（多板模块实测 25s 级才落完副本板）。
  */
-async function placeOnTempPageForRead(libraryUuid: string, cbbUuid: string, moduleName: string): Promise<string> {
-	const sheetUuid = await readLocalSheetUuid(libraryUuid, cbbUuid, moduleName);
+async function placeCbbSheetForRead(libraryUuid: string, cbbUuid: string, sheetUuid: string): Promise<void> {
 	const comp = edaGlobal()?.sch_PrimitiveComponent as
 		| { placeCbbSchematicPage?: (args: { libraryUuid: string; cbbUuid: string; uuid: string }, x: number, y: number) => Promise<boolean> }
 		| undefined;
@@ -1265,15 +1449,11 @@ async function placeOnTempPageForRead(libraryUuid: string, cbbUuid: string, modu
 		throw new Error('placeCbbSchematicPage 不可用（宿主版本过低或不支持）');
 	const ok = await withTimeout(
 		place.call(comp, { libraryUuid, cbbUuid, uuid: sheetUuid }, 0, 0),
-		PLACE_TIMEOUT_MS,
-		'临时页放置模块超时（30s）',
+		PLACE_READ_TIMEOUT_MS,
+		'临时页放置模块超时（60s）',
 	);
 	if (ok !== true)
 		throw new Error('临时页放置模块未成功（接口返回 false）');
-	const doc = await getCurrentDocState();
-	if (!doc.uuid)
-		throw new Error('放置后未获取到激活的图页');
-	return doc.uuid;
 }
 
 /** 从 .eprj2 明文工程树解析首个 schematic uuid（SQLite 行数据以 JSON 明文存储，无需 SQLite 库）。 */
