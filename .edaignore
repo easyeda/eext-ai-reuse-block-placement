@@ -7,9 +7,6 @@
 /node_modules/
 /src/
 /docs/
-/images/chat-hero.png
-/images/chat-dialog.png
-/images/settings.png
 /.editorconfig
 /.gitattributes
 /.gitignore
