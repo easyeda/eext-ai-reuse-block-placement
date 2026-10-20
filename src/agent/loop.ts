@@ -5,6 +5,7 @@
  */
 import type { CatalogJson, CatalogStatsView, WritableLibrary } from '../catalog';
 import type { CachedGeometry, PlaceBox, PlaceMode, PlaceTarget, RegionStyle, SelectionSnapshot } from '../cbb';
+import type { SchematicView, ViewRegion, VisionImage } from '../schematic-vision';
 import type { HistoryTurn } from './llm';
 import type { CatalogStoreRecord, FlatModule } from './store';
 import type { AgentToolName } from './tools';
@@ -12,10 +13,11 @@ import { listWritableLibraries } from '../catalog';
 import { activateSchematicPage, assertSelectionSize, cacheGeometry, collectPageObstacles, createCbbModuleFromSelection, DEFAULT_PAGE_WIDTH, estimateGeometry, getCurrentDocState, loadGeometry, modifyCbbModule, parsePlaceTarget, placeCbbModule, planAlignedPlacement, premeasureGeometry, readCbbSchematicSummary, readSchematicPage, readSelectionSnapshot, SELECTION_DESIGNATOR_LIMIT, selectModuleBySeed, selectPrimitives } from '../cbb';
 import { runSelfCheck } from '../env';
 import { edaGlobal } from '../host';
+import { captureSchematicView } from '../schematic-vision';
 import { getJevSettings, getLlmSettings, getPlacementSettings, getStylePrompt } from '../settings';
 import { classifyLlmError, registerAbort, releaseAbort, sendLlmRequest, STREAM_SENTINEL } from './http';
 import { recommendModules } from './jev';
-import { buildAgentRequest, buildPingRequest, parseAgentResponse, StreamAccumulator } from './llm';
+import { buildAgentRequest, buildPingRequest, parseAgentResponse, retainRecentImages, StreamAccumulator } from './llm';
 import { buildCatalogSummaryPayload, clearCatalogRecord, EMPTY_CATALOG_NOTE, flattenCatalog, hiddenLibraryBriefs, humanizeAge, loadModelCatalogRecord, lookupModule, refreshCatalogExclusive, searchInCatalog } from './store';
 import { AGENT_TOOL_NAMES, MAX_DESC_LEN } from './tools';
 
@@ -68,6 +70,7 @@ export interface ChatToolEvent {
 	/** 模型传入的真实参数（截断后），UI 展示用。 */
 	args?: unknown;
 	error?: string;
+	images?: Array<VisionImage>;
 }
 
 export interface PlacePickView {
@@ -355,6 +358,19 @@ interface ToolRunOutcome {
 	card?: ChatCardView;
 	gotoSettings?: boolean;
 	result: unknown;
+	images?: Array<VisionImage>;
+}
+
+async function visualObservation(view: SchematicView, region?: ViewRegion) {
+	if (getLlmSettings().visionEnabled === false)
+		return { images: undefined, vision: { enabled: false, error: '原理图视觉读取已关闭，仅提供结构化数据，不能声称看过截图。' } };
+	try {
+		const captured = await captureSchematicView(view, region);
+		return { images: [captured.image], vision: { enabled: true, ok: true, ...captured.observation } };
+	}
+	catch (e) {
+		return { images: undefined, vision: { enabled: true, ok: false, error: e instanceof Error ? e.message : String(e) } };
+	}
 }
 type ToolHandler = (s: ChatSession, args: Record<string, unknown>, bridgeVersion: string) => Promise<ToolRunOutcome>;
 
@@ -797,15 +813,27 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 	read_schematic: async (_s, _args) => {
 		try {
 			const page = await readSchematicPage();
+			const visual = await visualObservation('page');
 			return {
-				event: { name: 'read_schematic', argsSummary: page.pageName || '当前页', status: 'ok', detail: { components: page.components.length, wires: page.wires.length, nets: page.nets.length } },
-				result: page,
+				event: { name: 'read_schematic', argsSummary: page.pageName || '当前页', status: 'ok', detail: { components: page.components.length, wires: page.wires.length, nets: page.nets.length, vision: visual.vision } },
+				result: { ...page, vision: visual.vision },
+				images: visual.images,
 			};
 		}
 		catch (e) {
 			const error = e instanceof Error ? e.message : String(e);
 			return { event: { name: 'read_schematic', argsSummary: '当前页', status: 'err', error }, result: { ok: false, error } };
 		}
+	},
+	view_schematic: async (_s, args) => {
+		const view: SchematicView = args.view === 'page' || args.view === 'selection' || args.view === 'region' ? args.view : 'viewport';
+		const visual = await visualObservation(view, args.region as ViewRegion | undefined);
+		const ok = !!visual.images?.length;
+		return {
+			event: { name: 'view_schematic', argsSummary: view, status: ok ? 'ok' : 'err', detail: visual.vision },
+			result: visual.vision,
+			images: visual.images,
+		};
 	},
 	select_module: async (s, args) => {
 		const seed = String(args.seed || '').trim();
@@ -817,9 +845,11 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			});
 			// 自动选中的选区未经用户核对：置标志拦截同轮内的 propose_create_module。
 			s.agentSelected = true;
+			const visual = await visualObservation(res.selectedTotal ? 'selection' : 'viewport');
 			return {
-				event: { name: 'select_module', argsSummary: label, status: 'ok', detail: { members: res.members.length, selected: res.selectedTotal } },
-				result: { ...res, hint: '请在回复末尾提醒用户：以上是按空间距离聚出的粗略边界，请在画布上核对选区——漏掉的图元请手动补选，混入的邻居器件请手动取消选择，确认无误后再继续后续操作。' },
+				event: { name: 'select_module', argsSummary: label, status: 'ok', detail: { members: res.members.length, selected: res.selectedTotal, vision: visual.vision } },
+				result: { ...res, vision: visual.vision, hint: '先结合截图、实际选中位号清单与原图自行检查多选和漏选，本轮可继续调用 select_primitives 修正并查看新截图；最终说明选区边界并请用户核对，用户下一条消息确认后才能出创建卡。截图失败时明确说明未完成视觉核对。' },
+				images: visual.images,
 			};
 		}
 		catch (e) {
@@ -838,9 +868,11 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			const res = await selectPrimitives(ids, mode);
 			// 任何 AI 驱动的选区改动都置标志：选区未经用户核对前不许直接出建模块卡。
 			s.agentSelected = true;
+			const visual = await visualObservation(res.selected ? 'selection' : 'viewport');
 			return {
-				event: { name: 'select_primitives', argsSummary: `${mode}×${ids.length}`, status: 'ok', detail: { selected: res.selected } },
-				result: { ok: true, mode, requested: ids.length, ...res, hint: mode === 'clear' ? undefined : '请在回复末尾提醒用户：选区已更新，请在画布上核对——漏掉的图元请手动补选，不需要的图元请手动取消选择。核对确认后（用户下一条消息）才能调 propose_create_module 出卡。' },
+				event: { name: 'select_primitives', argsSummary: `${mode}×${ids.length}`, status: 'ok', detail: { selected: res.selected, vision: visual.vision } },
+				result: { ok: true, mode, requested: ids.length, ...res, vision: visual.vision, hint: mode === 'clear' ? undefined : '先自行核对新截图和实际选中清单，必要时继续补选或剔除；最终请用户核对后，下一条消息才能出创建卡。截图失败时不得声称已经视觉核对。' },
+				images: visual.images,
 			};
 		}
 		catch (e) {
@@ -1033,7 +1065,8 @@ export async function chatTurn(
 				? '\n\n找模块的工具分工：模块名/型号/器件名用 search_modules；带具体功能参数的描述用 recommend_modules，query 传用户原始需求整句。是否已经具体到可以检索，按【系统提示词】判断。recommend_modules 返回 cardShown=true 时放置卡已自动出示，禁止再调 propose_placement 重复出卡，直接写最终说明；cardShown=false 时按返回的 modules（含全量描述与 jevScore）直接回答，不要调 get_module 重复取详情，且不要主动出示放置卡——仅当用户明确要求放置时才调 propose_placement（picks 取自 modules，mode/target 参考 placement 字段）。'
 				: '\n\n当前未配置 Jev API Key（可选增强）：recommend_modules 暂不可用，需要检索时用 search_modules。是否已经具体到可以检索，按【系统提示词】判断。可顺带提醒用户到 设置 → Jev模型接入 补充 API Key（非必需）。';
 			const settings = getLlmSettings();
-			const req = buildAgentRequest(settings, catalogNote + jevHint, s.history, getStylePrompt());
+			const visionHint = settings.visionEnabled === false ? '\n原理图视觉读取已关闭，仅使用结构化信息，不得声称看过截图。' : '\n原理图视觉读取已开启：read_schematic 自动附整页截图，select 系列自动附选区与周边截图；用 view_schematic 放大局部。先视觉检查并修正多选、漏选，再请用户做最终核对。图片或模型视觉能力不可用时如实说明。';
+			const req = buildAgentRequest(settings, catalogNote + jevHint + visionHint, s.history, getStylePrompt());
 			req.stream = true;
 			// 流式路径：delta 实时转发；累积器负责把三家协议的增量拼回完整响应。
 			// 通道不支持分块时 sendLlmRequest 自动降级返回完整 JSON（旧解析路径）。
@@ -1114,6 +1147,7 @@ export async function chatTurn(
 						return abortedResult();
 					}
 					ran.event.args = uiJsonPreview(args);
+					ran.event.images = ran.images;
 					tools.push(ran.event);
 					if (ran.card) {
 						cards.push(ran.card);
@@ -1127,7 +1161,9 @@ export async function chatTurn(
 						content: toolResultJson(ran.result),
 						toolCallId: call.id,
 						toolName: call.name,
+						images: ran.images,
 					});
+					retainRecentImages(s.history);
 				}
 				catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
@@ -1159,7 +1195,7 @@ export async function chatTurn(
 		if (signal.aborted)
 			return abortedResult();
 		const { kind, message } = classifyLlmError(e);
-		const goto = kind === 'auth' || kind === 'path' || kind === 'unconfigured' || kind === 'permission';
+		const goto = kind === 'auth' || kind === 'path' || kind === 'unconfigured' || kind === 'permission' || kind === 'vision';
 		// llm.request 伪工具事件已移除：出站 HTTP 是插件行为而非模型工具调用，
 		// 失败信息经 assistantText 恢复话术与 error 字段呈现。
 		const failed: ChatTurnResult = {
@@ -1198,6 +1234,7 @@ function summarizeToolArgs(name: string, args: Record<string, unknown>): string 
 		case 'propose_create_module':
 			return String(args.name || '').trim() || '新建复用模块';
 		case 'read_schematic':
+		case 'view_schematic':
 			return '读当前页';
 		case 'select_module':
 			return String(args.seed || '').trim() || '聚类选中';
@@ -1228,6 +1265,8 @@ function recoverySpeech(kind: string, message: string): string {
 			return '无法出网：**外部交互权限未开启**。请在扩展管理中为本插件启用「外部交互权限」。';
 		case 'unconfigured':
 			return '尚未配置模型接入，请到 设置 → 模型接入 完成 baseUrl / apiKey / model。';
+		case 'vision':
+			return `模型服务拒绝了图片请求，请检查所选模型是否支持图片输入，以及 API 格式是否匹配。可在 设置 → 模型接入 更换视觉模型，或关闭「原理图视觉」。${message}`;
 		default:
 			return `调用模型失败：${message}`;
 	}
@@ -1543,7 +1582,7 @@ export function cancelCard(sessionId: string, token: string): void {
 		rec.status = 'dead';
 }
 
-export async function testLlmConnection(): Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }> {
+export async function testLlmConnection(): Promise<{ ok: boolean; model: string; latencyMs: number; error?: string; vision?: boolean }> {
 	const ready = settingsReady();
 	if (!ready.ok)
 		return { ok: false, model: '', latencyMs: 0, error: `缺少 ${ready.missing.join('、')}` };
@@ -1551,10 +1590,10 @@ export async function testLlmConnection(): Promise<{ ok: boolean; model: string;
 	const started = Date.now();
 	try {
 		await sendLlmRequest(buildPingRequest(settings));
-		return { ok: true, model: settings.model.trim(), latencyMs: Date.now() - started };
+		return { ok: true, model: settings.model.trim(), latencyMs: Date.now() - started, vision: settings.visionEnabled !== false };
 	}
 	catch (e) {
-		const { message } = classifyLlmError(e);
-		return { ok: false, model: settings.model.trim(), latencyMs: Date.now() - started, error: message };
+		const { kind, message } = classifyLlmError(e);
+		return { ok: false, model: settings.model.trim(), latencyMs: Date.now() - started, error: kind === 'vision' ? recoverySpeech(kind, message) : message };
 	}
 }

@@ -1,3 +1,4 @@
+import type { VisionImage } from '../schematic-vision';
 /**
  * 三格式请求构造 / 响应解析（OpenAI Chat、OpenAI Responses、Anthropic Messages）。
  */
@@ -16,8 +17,10 @@ export interface ParsedAgentResponse {
 	toolCalls: Array<ParsedToolCall>;
 	/** 思维链文本（reasoning/thinking），未开启或端点未返回时为空串。 */
 	reasoning: string;
-	/** 端点因达到补全上限而截断（finish_reason=length / stop_reason=max_tokens）。
-	 *  截断时思考与正文都可能不完整，必须让用户看见而不是无声中断。 */
+	/**
+	 * 端点因达到补全上限而截断（finish_reason=length / stop_reason=max_tokens）。
+	 *  截断时思考与正文都可能不完整，必须让用户看见而不是无声中断。
+	 */
 	truncated?: boolean;
 }
 
@@ -27,6 +30,52 @@ export interface HistoryTurn {
 	toolCalls?: Array<ParsedToolCall>;
 	toolCallId?: string;
 	toolName?: string;
+	/** 图片独立于工具 JSON，必须作为原生图像内容块发送。 */
+	images?: Array<VisionImage>;
+}
+
+export function retainRecentImages(history: Array<HistoryTurn>, limit = 3): void {
+	let remaining = limit;
+	for (let i = history.length - 1; i >= 0; i--) {
+		const images = history[i].images || [];
+		history[i].images = remaining > 0 ? images.slice(-remaining) : undefined;
+		remaining -= Math.min(remaining, images.length);
+	}
+}
+
+/** 所有并列工具结果必须先配对，再追加图像观察，避免打断 tool_calls 协议。 */
+function visualHistory(history: Array<HistoryTurn>, enabled: boolean): Array<HistoryTurn> {
+	const result: Array<HistoryTurn> = [];
+	let pending: Array<VisionImage> = [];
+	for (let i = 0; i < history.length; i++) {
+		const turn = history[i];
+		result.push(turn.role === 'tool' || !enabled ? { ...turn, images: undefined } : turn);
+		if (enabled && turn.role === 'tool')
+			pending.push(...(turn.images || []));
+		if (pending.length && history[i + 1]?.role !== 'tool') {
+			result.push({ role: 'user', content: '以下是刚完成的原理图工具返回的视觉观察，请结合工具中的图页、选区清单与位号核对。较早的截图不代表当前选区。', images: pending });
+			pending = [];
+		}
+	}
+	return result;
+}
+
+function imageParts(turn: HistoryTurn, format: 'chat' | 'responses' | 'anthropic'): string | Array<Record<string, unknown>> {
+	if (!turn.images?.length)
+		return turn.content;
+	const content: Array<Record<string, unknown>> = [{ type: format === 'responses' ? 'input_text' : 'text', text: turn.content }];
+	for (const image of turn.images) {
+		const match = /^data:(image\/(?:png|jpeg|webp));base64,([A-Z0-9+/]+={0,2})$/i.exec(image.dataUrl);
+		if (!match)
+			throw new Error('原理图图像数据格式无效');
+		content.push({ type: format === 'responses' ? 'input_text' : 'text', text: image.caption });
+		content.push(format === 'anthropic'
+			? { type: 'image', source: { type: 'base64', media_type: match[1], data: match[2] } }
+			: format === 'responses'
+				? { type: 'input_image', image_url: image.dataUrl, detail: 'high' }
+				: { type: 'image_url', image_url: { url: image.dataUrl, detail: 'high' } });
+	}
+	return content;
 }
 
 function joinUrl(base: string, path: string): string {
@@ -52,7 +101,7 @@ function toOpenAiChatMessages(systemPrompt: string, history: Array<HistoryTurn>)
 	];
 	for (const t of history) {
 		if (t.role === 'user') {
-			msgs.push({ role: 'user', content: t.content });
+			msgs.push({ role: 'user', content: imageParts(t, 'chat') });
 		}
 		else if (t.role === 'assistant') {
 			const row: Record<string, unknown> = { role: 'assistant', content: t.content || null };
@@ -76,7 +125,7 @@ function toAnthropicMessages(history: Array<HistoryTurn>): Array<Record<string, 
 	const msgs: Array<Record<string, unknown>> = [];
 	for (const t of history) {
 		if (t.role === 'user') {
-			msgs.push({ role: 'user', content: t.content });
+			msgs.push({ role: 'user', content: imageParts(t, 'anthropic') });
 		}
 		else if (t.role === 'assistant') {
 			const content: Array<Record<string, unknown>> = [];
@@ -104,7 +153,7 @@ function toResponsesInput(history: Array<HistoryTurn>): Array<Record<string, unk
 	const input: Array<Record<string, unknown>> = [];
 	for (const t of history) {
 		if (t.role === 'user') {
-			input.push({ role: 'user', content: t.content });
+			input.push({ role: 'user', content: imageParts(t, 'responses') });
 		}
 		else if (t.role === 'assistant') {
 			if (t.content)
@@ -132,6 +181,7 @@ export function buildAgentRequest(
 	stylePrompt: string,
 ): LlmRequest {
 	const base = settings.baseUrl.trim().replace(/\/+$/, '');
+	history = visualHistory(history, settings.visionEnabled !== false);
 	const systemPrompt = `${composeSystemPrompt(stylePrompt)}\n${systemExtra}`.trim();
 	if (settings.provider === 'anthropic') {
 		const url = anthropicEndpoint(base);
@@ -183,6 +233,16 @@ export function buildAgentRequest(
 
 export function buildPingRequest(settings: LlmSettings): LlmRequest {
 	const base = settings.baseUrl.trim().replace(/\/+$/, '');
+	const ping: HistoryTurn = {
+		role: 'user',
+		content: 'Reply OK.',
+		images: settings.visionEnabled === false
+			? undefined
+			: [{
+					dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+					caption: '图片输入连通性测试',
+				}],
+	};
 	if (settings.provider === 'anthropic') {
 		const url = anthropicEndpoint(base);
 		return {
@@ -191,7 +251,7 @@ export function buildPingRequest(settings: LlmSettings): LlmRequest {
 				model: settings.model.trim(),
 				max_tokens: 16,
 				temperature: 0,
-				messages: [{ role: 'user', content: 'ping' }],
+				messages: [{ role: 'user', content: imageParts(ping, 'anthropic') }],
 			}),
 			headers: anthropicHeaders(settings),
 		};
@@ -202,7 +262,7 @@ export function buildPingRequest(settings: LlmSettings): LlmRequest {
 			body: JSON.stringify({
 				model: settings.model.trim(),
 				max_output_tokens: 16,
-				input: 'ping',
+				input: [{ role: 'user', content: imageParts(ping, 'responses') }],
 			}),
 			headers: openaiHeaders(settings),
 		};
@@ -213,7 +273,7 @@ export function buildPingRequest(settings: LlmSettings): LlmRequest {
 			model: settings.model.trim(),
 			max_tokens: 16,
 			temperature: 0,
-			messages: [{ role: 'user', content: 'ping' }],
+			messages: [{ role: 'user', content: imageParts(ping, 'chat') }],
 		}),
 		headers: openaiHeaders(settings),
 	};

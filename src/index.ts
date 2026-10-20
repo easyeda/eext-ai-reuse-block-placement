@@ -56,7 +56,7 @@ export interface CbbCopilotBridge {
 	cancelCard: (sessionId: string, token: string) => void;
 	resetChatSession: (sessionId: string) => void;
 	selfCheck: () => Promise<string>;
-	testConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }>;
+	testConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string; vision?: boolean }>;
 	/** Jev 链路连通性测试（最小 noul 评估）：校验 Jev baseUrl / Key / model。 */
 	testJevConnection: () => Promise<{ ok: boolean; model: string; latencyMs: number; error?: string }>;
 }

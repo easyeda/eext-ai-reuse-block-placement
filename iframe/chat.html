@@ -263,6 +263,7 @@
   #secCatalog .opresult{flex:none;}
   .frow{display:flex; align-items:center; gap:8px; margin-bottom:6px;}
   .frow label{width:72px; flex:none; color:var(--text-2); font-size:12px; text-align:right;}
+  .frow .vision-toggle{width:auto; text-align:left; display:flex; align-items:center; gap:6px;}
   .frow .fctl{flex:1; min-width:0; display:flex; align-items:center; gap:8px;}
   .frow input[type=text], .frow input[type=password], .frow select{
     flex:1; padding:6px 10px; border:1px solid var(--line); border-radius:7px;
@@ -380,6 +381,10 @@
           <div class="frow"><label>model</label><div class="fctl">
             <input type="text" id="setModel" value="" placeholder="如 deepseek-chat / claude-sonnet-4-5">
           </div></div>
+          <div class="frow"><label>原理图视觉</label><div class="fctl">
+            <label class="vision-toggle"><input type="checkbox" id="setVision" checked> 启用截图读取与选区核对</label>
+          </div></div>
+          <div class="hint">需要支持图片输入的模型。截图发送至当前配置的模型服务，模型选中后会结合截图自行检查多选和漏选。</div>
           <div class="frow"><label></label><div class="fctl">
             <button class="btn primary" id="saveSettings">保存设置</button>
             <button class="btn" id="testConn">测试连接</button>
@@ -612,7 +617,7 @@
   };
   const mockBridge = {
     version: '0.4.0-mock',
-    getLlmSettings() { return { provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value }; },
+    getLlmSettings() { return { provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value, visionEnabled: $('#setVision').checked }; },
     saveLlmSettings() { return; },
     onAgentEvent(_sid, handler) { mockEventHandler = typeof handler === 'function' ? handler : null; },
     abortChatTurn() { mockAborted = true; return true; },
@@ -1094,10 +1099,24 @@
         argsJson = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
         detail.textContent = [argsText, argsJson ? `入参: ${argsJson}` : ''].filter(Boolean).join('\n');
       },
-      done(detailData) {
+      done(detailData, images) {
         el.classList.add('ok');
         label.textContent = `${name} · completed`;
+        if (detailData?.vision?.enabled && detailData.vision.ok === false) label.textContent += '（截图失败）';
         fill(detailData);
+        for (const image of images || []) {
+          if (!/^data:image\/(png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(image.dataUrl || '')) continue;
+          const figure = document.createElement('figure');
+          figure.style.margin = '10px 0 0';
+          const img = document.createElement('img');
+          img.src = image.dataUrl;
+          img.alt = image.caption || '发送给模型的原理图截图';
+          img.style.cssText = 'display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:6px;';
+          const caption = document.createElement('figcaption');
+          caption.textContent = image.caption || '发送给模型的原理图截图';
+          figure.append(img, caption);
+          detail.appendChild(figure);
+        }
         scrollBottom();
       },
       fail(err, detailData) {
@@ -1514,7 +1533,7 @@
   function renderTools(tools, body) {
     (tools || []).forEach(t => {
       const tb = addToolBubble(t.name, t.argsSummary || '', body);
-      if (t.status === 'ok') tb.done(t.detail);
+      if (t.status === 'ok') tb.done(t.detail, t.images);
       else if (t.status === 'skip') tb.skip(t.error);
       else tb.fail(t.error || '失败', t.detail);
     });
@@ -1589,7 +1608,7 @@
       if (!tb) return;
       const t = ev.event;
       /* detail = 工具真实执行结果 JSON（后端已截断）；失败时展示 error + 参数 */
-      if (t.status === 'ok') tb.done(t.detail);
+      if (t.status === 'ok') tb.done(t.detail, t.images);
       else if (t.status === 'skip') tb.skip(t.error || '已跳过');
       else tb.fail(t.error || '失败', t.detail);
       return;
@@ -1778,7 +1797,7 @@
       }
       const res = await bridge.testJevConnection();
       r.className = res.ok ? 'opresult ok' : 'opresult err';
-      r.textContent = res.ok ? `✅ 连接成功：${res.model} · ${res.latencyMs}ms` : `❌ ${res.error}`;
+      r.textContent = res.ok ? `✅ 连接成功：${res.model} · ${res.latencyMs}ms${res.vision ? ' · 图片请求已通过' : ''}` : `❌ ${res.error}`;
     } catch (e) {
       r.className = 'opresult err'; r.textContent = '❌ ' + e.message;
     } finally {
@@ -1793,6 +1812,7 @@
         $('#setBase').value = s.baseUrl || '';
         $('#setKey').value = s.apiKey || '';
         $('#setModel').value = s.model || '';
+        $('#setVision').checked = s.visionEnabled !== false;
       }
     } catch (e) {}
     try {
@@ -2091,7 +2111,7 @@
 
   $('#saveSettings').onclick = async () => {
     try {
-      bridge.saveLlmSettings({ provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value });
+      bridge.saveLlmSettings({ provider: $('#setFormat').value, baseUrl: $('#setBase').value, apiKey: $('#setKey').value, model: $('#setModel').value, visionEnabled: $('#setVision').checked });
       if (typeof bridge.savePlacementSettings === 'function') {
         const hex = v => (/^#[0-9a-fA-F]{6}$/.test(String(v).trim()) ? String(v).trim() : '');
         const num = (v, min) => (Number.isFinite(+v) && +v > (min || 0) ? +v : null);

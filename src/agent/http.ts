@@ -24,7 +24,7 @@ export const LLM_STREAM_IDLE_MS = 180000;
 /** 流式探测缓冲阈值：收到的字节超过该值仍无法按 SSE 解析时，判定通道不透传分块（缓冲降级）。 */
 const STREAM_FALLBACK_BYTES = 256;
 
-export type LlmErrorKind = 'auth' | 'path' | 'rate' | 'timeout' | 'format' | 'permission' | 'network' | 'unconfigured' | 'other';
+export type LlmErrorKind = 'auth' | 'path' | 'rate' | 'timeout' | 'format' | 'permission' | 'network' | 'unconfigured' | 'vision' | 'other';
 
 export class LlmHttpError extends Error {
 	kind: LlmErrorKind;
@@ -315,6 +315,8 @@ export async function sendLlmRequest(req: LlmRequest, handlers?: StreamHandlers,
 				throw new LlmHttpError('path', `HTTP 404：baseUrl 路径不对——一般应填到 /v1 这一级（如 https://api.deepseek.com/v1）。${sliceBody(bodyText)}`, 404);
 			if (r.status === 429)
 				throw new LlmHttpError('rate', `HTTP 429：请求被限流，请稍后重试。${sliceBody(bodyText)}`, 429);
+			if (/image|vision|multimodal|图片|视觉/i.test(bodyText) && /support|invalid|format|only.*text|不支持|格式/i.test(bodyText))
+				throw new LlmHttpError('vision', `HTTP ${r.status ?? '?'}：模型服务拒绝了图片请求。${sliceBody(bodyText)}`, r.status);
 			throw new LlmHttpError('other', `HTTP ${r.status ?? '?'}:${sliceBody(bodyText)}`, r.status);
 		}
 		// 流式路径：SSE 分块读取；channel 不可流式（无 body reader 或整体缓冲）时降级为完整 JSON。
