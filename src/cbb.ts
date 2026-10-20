@@ -1234,7 +1234,7 @@ export async function modifyCbbModule(params: ModifyCbbParams): Promise<void> {
 //    查（lib_Device.get 返回 undefined）查不到——唯一可靠的桥是**器件名**：search(元件名)
 //    再取 name 精确匹配的那条。
 // 2) create() 返回的 primitiveId **不可靠**：同一调用有时返回、有时不返回，但元件都落页了。
-//    成败一律以「回读页面」判定，不看返回值。同理，改动后立刻读���会拿到旧值，故回读前先 sleep。
+//    成败一律以「回读页面」判定，不看返回值。同理，改动后立刻读取会拿到旧值，故回读前先 sleep。
 
 /** 单个待重建器件。 */
 export interface SelectionPart {

@@ -125,7 +125,7 @@
   .tool.running .tool-label{animation:tool-pulse 1.4s ease-in-out infinite;}
   .tool.running .tool-line{color:var(--text-2);}
   @keyframes tool-pulse{0%,100%{opacity:1;}50%{opacity:.45;}}
-  /* ── 思维链（reasoning）折叠块：默认展开跟随流出，结束后自动收起 ── */
+  /* ── 思维链（reasoning）折叠块：默认折叠，用户可点击展开 ── */
   .tool.reasoning{cursor:pointer;}
   .tool.reasoning .tool-line{color:var(--text-3);}
   .tool.reasoning .tool-label{font-style:normal;}
@@ -1133,9 +1133,9 @@
       },
     };
   }
-  /* ── 思维链折叠块：流式期间展开跟随，完成后自动收起；点击行切换展开 ── */
+  /* ── 思维链折叠块：默认折叠；流式更新不改变用户的展开选择 ── */
   function addReasoningBlock(parentEl) {
-    const el = document.createElement('div'); el.className = 'tool reasoning streaming open';
+    const el = document.createElement('div'); el.className = 'tool reasoning streaming';
     el.innerHTML = `
       <div class="tool-line">
         <span class="tool-label">Thinking</span>
@@ -1146,7 +1146,6 @@
     const label = el.querySelector('.tool-label');
     const stream = el.querySelector('.reasoning-stream');
     let text = '';
-    let settleTimer = null;
     scrollBottom();
     return {
       append(delta) {
@@ -1154,15 +1153,13 @@
         stream.textContent = text;
         scrollBottom();
       },
-      /* 结束：label 定格为 Thought，稍后自动收起（用户手动操作过则维持其选择）。
+      /* 结束：label 定格为 Thought，默认保持折叠（用户手动操作过则维持其选择）。
          幂等：轮次边界 / 工具开始 / 整轮结束多处触发，只生效一次。 */
       done() {
         if (!el.classList.contains('streaming')) return;
         el.classList.remove('streaming');
         label.textContent = 'Thought';
-        settleTimer = setTimeout(() => {
-          if (!el.dataset.userToggled) el.classList.remove('open');
-        }, 1200);
+        if (!el.dataset.userToggled) el.classList.remove('open');
       },
       el,
     };
@@ -1471,6 +1468,8 @@
     const el = cardShell({
       title: '新建复用模块确认',
       bodyHTML: `<div class="pick-item" style="display:block">
+          <div class="hint" style="color:var(--text)"><strong>请先查看画布中当前选中的器件和连线，确认无多选或漏选后，再点击「创建模块」。</strong></div>
+          <div class="hint">本卡记录出卡时的选区。出卡后若调整了选区，请重新生成创建卡，再核对下方数量、位号和网络名。</div>
           <div class="pi-title">将写入：${esc(counts.length ? counts.join(' · ') : '（无）')}</div>
           ${chips.length ? `<div class="pi-reason">${chips.join('　')}</div>` : ''}
           <label style="${labelStyle}">模块名称</label>
@@ -1484,7 +1483,7 @@
           <div class="hint">工程内编辑过的元件符号不会随模块带过去，与其相连的导线可能断开——创建后请核对。</div>
           <div class="hint">确认后会先保存当前图页，并短暂切换到新建的模块工程，完成后自动切回原工程。切换期间请勿操作编辑器。</div>
         </div>`,
-      footHTML: `<button class="btn primary act-create">创建模块</button><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
+      footHTML: `<button class="btn primary act-create">创建模块</button><span class="hint" style="margin:0">请先核对当前选区</span><span class="spacer"></span><button class="btn act-cancel">取消</button>`,
     });
     const libSel = el.querySelector('.cm-lib');
     libSel.onchange = () => {

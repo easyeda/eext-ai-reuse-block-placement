@@ -151,7 +151,7 @@ export async function captureSchematicView(view: SchematicView, region?: ViewReg
 	const width = png ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(16) : undefined;
 	const height = png ? new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(20) : undefined;
 	return {
-		image: { dataUrl: `data:${blob.type};base64,${imageBase64(bytes)}`, caption: `原理图${view === 'selection' ? '选区与周边' : view === 'page' ? '整页' : '局部'}截图；选中器件以回读清单为准，结合图上位号检查漏选和多选。` } satisfies VisionImage,
+		image: { dataUrl: `data:${blob.type};base64,${imageBase64(bytes)}`, caption: `原理图${view === 'selection' ? '选区与周边' : view === 'page' ? '整页' : '局部'}截图；实际选中状态以回读清单为准；检查器件后，另逐项核对 GND/电源标志、网络端口、导线标签及连接线。同名标志按 id 和位置区分，图上可见不代表已选中。` } satisfies VisionImage,
 		observation: {
 			pageUuid: doc.uuid,
 			view,

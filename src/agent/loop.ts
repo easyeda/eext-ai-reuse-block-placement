@@ -19,7 +19,7 @@ import { classifyLlmError, registerAbort, releaseAbort, sendLlmRequest, STREAM_S
 import { recommendModules } from './jev';
 import { buildAgentRequest, buildPingRequest, parseAgentResponse, retainRecentImages, StreamAccumulator } from './llm';
 import { buildCatalogSummaryPayload, clearCatalogRecord, EMPTY_CATALOG_NOTE, flattenCatalog, hiddenLibraryBriefs, humanizeAge, loadModelCatalogRecord, lookupModule, refreshCatalogExclusive, searchInCatalog } from './store';
-import { AGENT_TOOL_NAMES, MAX_DESC_LEN } from './tools';
+import { AGENT_TOOL_NAMES, MAX_DESC_LEN, SELECTION_REVIEW_PROMPT } from './tools';
 
 /** 单条消息最多发起的模型调用轮数（每轮 = 思考 + 可选工具执行；工具结果驱动下一轮）。 */
 const MAX_AGENT_ROUNDS = 12;
@@ -215,13 +215,6 @@ interface ChatSession {
 	cards: Map<string, CardRecord>;
 	/** 本会话内已成功做过原理图分析的模块 uuid（给编辑卡打"已分析"标记）。 */
 	analyzed: Set<string>;
-	/**
-	 * 本轮对话内刚执行过自动选中（select_module / select_primitives）。
-	 * propose_create_module 据此拦截：AI 自动选中的选区**未经用户核对**，直接出卡
-	 * 会把选错的内容送进库。必须等用户下一条消息（核对/调整/确认）后才放行——
-	 * 标志在每轮 chatTurn 开始时清除，即「同一轮内选完直接出卡被拒，跨轮放行」。
-	 */
-	agentSelected: boolean;
 }
 
 const sessions = new Map<string, ChatSession>();
@@ -229,7 +222,7 @@ const sessions = new Map<string, ChatSession>();
 function sessionOf(id: string): ChatSession {
 	let s = sessions.get(id);
 	if (!s) {
-		s = { history: [], cards: new Map(), analyzed: new Set(), agentSelected: false };
+		s = { history: [], cards: new Map(), analyzed: new Set() };
 		sessions.set(id, s);
 	}
 	return s;
@@ -727,13 +720,6 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			result: { ok: false, error },
 		});
 		const label = typeof args.name === 'string' && args.name.trim() ? args.name.trim() : '(未命名)';
-		// ★ 同轮拦截：本轮刚执行过自动选中（select_module / select_primitives）时，选区尚未
-		//   经用户核对，直接出卡会把选错的内容送进库。必须先结束回复提醒用户核对，
-		//   用户下一条消息（标志在 chatTurn 开始时清除）之后才允许出卡。
-		if (s.agentSelected) {
-			const error = '本次选区刚由自动选中生成，尚未经用户核对，不能直接出示建模块确认卡。请立即结束本轮回复：说明已按聚类选中并提醒用户在画布上核对（漏掉的图元手动补选、混入的器件手动取消），待用户下一条消息确认后再调用 propose_create_module。';
-			return { event: { name: 'propose_create_module', argsSummary: label, status: 'err', error }, result: { ok: false, error, needUserConfirm: true } };
-		}
 		let snapshot: SelectionSnapshot;
 		try {
 			snapshot = await readSelectionSnapshot();
@@ -806,7 +792,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				ok: true,
 				token,
 				summary,
-				hint: '已出示建模块确认卡，等待用户确认后才会写库。同一条回复里请告知用户：确认后会先保存当前图页，并短暂切换到新建的模块工程，完成后自动切回原工程。',
+				hint: '已出示建模块确认卡，无需用户再发消息确认。请提醒用户先查看画布中的当前选区，确认无多选或漏选后点击卡片「创建模块」。点击后才会保存当前图页、短暂切换到新模块工程并写库，完成后自动切回原工程。',
 			},
 		};
 	},
@@ -843,12 +829,10 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 				linkDistance: typeof args.linkDistance === 'number' ? args.linkDistance : undefined,
 				margin: typeof args.margin === 'number' ? args.margin : undefined,
 			});
-			// 自动选中的选区未经用户核对：置标志拦截同轮内的 propose_create_module。
-			s.agentSelected = true;
 			const visual = await visualObservation(res.selectedTotal ? 'selection' : 'viewport');
 			return {
 				event: { name: 'select_module', argsSummary: label, status: 'ok', detail: { members: res.members.length, selected: res.selectedTotal, vision: visual.vision } },
-				result: { ...res, vision: visual.vision, hint: '先结合截图、实际选中位号清单与原图自行检查多选和漏选，本轮可继续调用 select_primitives 修正并查看新截图；最终说明选区边界并请用户核对，用户下一条消息确认后才能出创建卡。截图失败时明确说明未完成视觉核对。' },
+				result: { ...res, vision: visual.vision, hint: SELECTION_REVIEW_PROMPT },
 				images: visual.images,
 			};
 		}
@@ -866,12 +850,10 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		}
 		try {
 			const res = await selectPrimitives(ids, mode);
-			// 任何 AI 驱动的选区改动都置标志：选区未经用户核对前不许直接出建模块卡。
-			s.agentSelected = true;
 			const visual = await visualObservation(res.selected ? 'selection' : 'viewport');
 			return {
 				event: { name: 'select_primitives', argsSummary: `${mode}×${ids.length}`, status: 'ok', detail: { selected: res.selected, vision: visual.vision } },
-				result: { ok: true, mode, requested: ids.length, ...res, vision: visual.vision, hint: mode === 'clear' ? undefined : '先自行核对新截图和实际选中清单，必要时继续补选或剔除；最终请用户核对后，下一条消息才能出创建卡。截图失败时不得声称已经视觉核对。' },
+				result: { ok: true, mode, requested: ids.length, ...res, vision: visual.vision, hint: mode === 'clear' ? undefined : SELECTION_REVIEW_PROMPT },
 				images: visual.images,
 			};
 		}
@@ -1001,8 +983,6 @@ export async function chatTurn(
 ): Promise<ChatTurnResult> {
 	const text = redactSecrets((userText || '').trim());
 	const s = sessionOf(sessionId);
-	// 新的用户消息 = 用户有了核对选区的机会：解除「选中后禁止直接出建模块卡」的拦截。
-	s.agentSelected = false;
 	const tools: Array<ChatToolEvent> = [];
 	const cards: Array<ChatCardView> = [];
 	let gotoSettings = false;
@@ -1065,7 +1045,7 @@ export async function chatTurn(
 				? '\n\n找模块的工具分工：模块名/型号/器件名用 search_modules；带具体功能参数的描述用 recommend_modules，query 传用户原始需求整句。是否已经具体到可以检索，按【系统提示词】判断。recommend_modules 返回 cardShown=true 时放置卡已自动出示，禁止再调 propose_placement 重复出卡，直接写最终说明；cardShown=false 时按返回的 modules（含全量描述与 jevScore）直接回答，不要调 get_module 重复取详情，且不要主动出示放置卡——仅当用户明确要求放置时才调 propose_placement（picks 取自 modules，mode/target 参考 placement 字段）。'
 				: '\n\n当前未配置 Jev API Key（可选增强）：recommend_modules 暂不可用，需要检索时用 search_modules。是否已经具体到可以检索，按【系统提示词】判断。可顺带提醒用户到 设置 → Jev模型接入 补充 API Key（非必需）。';
 			const settings = getLlmSettings();
-			const visionHint = settings.visionEnabled === false ? '\n原理图视觉读取已关闭，仅使用结构化信息，不得声称看过截图。' : '\n原理图视觉读取已开启：read_schematic 自动附整页截图，select 系列自动附选区与周边截图；用 view_schematic 放大局部。先视觉检查并修正多选、漏选，再请用户做最终核对。图片或模型视觉能力不可用时如实说明。';
+			const visionHint = settings.visionEnabled === false ? '\n原理图视觉读取已关闭，仅使用结构化信息，不得声称看过截图。' : '\n原理图视觉读取已开启：read_schematic 自动附整页截图，select 系列自动附选区与周边截图；用 view_schematic 放大局部。先核对器件，再专门逐项核对 GND、电源标志、网络端口、可见网络标签和连接线，必要时放大局部并按准确 id 补选/剔除，修正后再次查看实际选区；用户要求创建模块时直接出确认卡，提醒其先核对当前选区再点击「创建模块」，无需再发消息确认。图片或模型视觉能力不可用时如实说明。';
 			const req = buildAgentRequest(settings, catalogNote + jevHint + visionHint, s.history, getStylePrompt());
 			req.stream = true;
 			// 流式路径：delta 实时转发；累积器负责把三家协议的增量拼回完整响应。
