@@ -132,6 +132,7 @@ export interface CreateModuleSummaryView {
 	wires: number;
 	netFlags: number;
 	netPorts: number;
+	shortCircuitFlags: number;
 	/** 器件位号（超出上限只给计数，不逐个列）。 */
 	designators: Array<string>;
 	/** 选区涉及的网络名。 */
@@ -732,7 +733,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 		catch (e) {
 			return fail(e instanceof Error ? e.message : String(e), label);
 		}
-		const total = snapshot.parts.length + snapshot.wires.length + snapshot.netFlags.length + snapshot.netPorts.length;
+		const total = snapshot.parts.length + snapshot.wires.length + snapshot.netFlags.length + snapshot.netPorts.length + snapshot.shortCircuitFlags.length;
 		if (!total)
 			return fail('选中的内容里没有可写入模块的图元（页框等不会被写入）。请提示用户改选元件、走线、网络标志或网络端口。', label);
 
@@ -768,6 +769,7 @@ const TOOL_HANDLERS: Record<AgentToolName, ToolHandler> = {
 			wires: snapshot.wires.length,
 			netFlags: snapshot.netFlags.length,
 			netPorts: snapshot.netPorts.length,
+			shortCircuitFlags: snapshot.shortCircuitFlags.length,
 			designators: snapshot.parts.map(p => p.designator || p.deviceName).filter(Boolean).slice(0, SELECTION_DESIGNATOR_LIMIT),
 			nets: [...new Set([...snapshot.netFlags, ...snapshot.netPorts].map(f => f.net).filter(Boolean))].slice(0, SELECTION_DESIGNATOR_LIMIT),
 			unsupported: [...new Set(snapshot.unsupported)],
@@ -1411,7 +1413,7 @@ export interface CreateModuleConfirmResult {
 	cbbUuid?: string;
 	name?: string;
 	libraryLabel?: string;
-	rebuilt?: { parts: number; wires: number; netFlags: number; netPorts: number };
+	rebuilt?: { parts: number; wires: number; netFlags: number; netPorts: number; shortCircuitFlags: number };
 	/** 未能重建的图元说明（器件缺库等），不阻断整体成功。 */
 	failures?: Array<string>;
 	error?: string;

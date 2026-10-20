@@ -1439,6 +1439,7 @@
     if (s.wires) counts.push(`${s.wires} 条走线`);
     if (s.netFlags) counts.push(`${s.netFlags} 个网络标志`);
     if (s.netPorts) counts.push(`${s.netPorts} 个网络端口`);
+    if (s.shortCircuitFlags) counts.push(`${s.shortCircuitFlags} 个短接标识`);
     const chips = [];
     if ((s.designators || []).length) chips.push('位号 ' + (s.designators || []).map(esc).join('、'));
     if ((s.nets || []).length) chips.push('网络 ' + (s.nets || []).map(esc).join('、'));
@@ -1490,7 +1491,7 @@
         if (res.ok) {
           tb.done(res); busy = false;
           const r = res.rebuilt || {};
-          const detail = `器件 ${r.parts || 0} · 走线 ${r.wires || 0} · 网络标志 ${r.netFlags || 0} · 网络端口 ${r.netPorts || 0}`;
+          const detail = `器件 ${r.parts || 0} · 走线 ${r.wires || 0} · 网络标志 ${r.netFlags || 0} · 网络端口 ${r.netPorts || 0} · 短接标识 ${r.shortCircuitFlags || 0}`;
           let msg = `复用模块 **${res.name}** 已写入${res.libraryLabel ? `「${res.libraryLabel}」` : '目标库'}（${detail}）。请到库面板**刷新后**查看——面板不会自动出现新模块。`;
           if ((res.failures || []).length) msg += `\n\n有 ${res.failures.length} 项未能重建：\n${res.failures.map(f => `- ${f}`).join('\n')}`;
           await streamAi(msg, 3);
@@ -1674,7 +1675,7 @@
   $('#settingsBtn').onclick = () => switchTab(
     $('#page-settings').classList.contains('on') ? 'chat' : 'settings');
 
-  const CHIP_PROMPTS = ['帮我找5V/3A 降压电源模块', '放置推荐的模块到当前图页', '修改模块的名称和描述', '导出推荐的模块目录json'];
+  const CHIP_PROMPTS = ['帮我找5V/3A 降压电源模块', '放置推荐的模块到当前图页', '修改模块的名称和描述', '导出推荐的模块目录json', '帮我从当前原理图中提取模块'];
   /* 建议项点击：只把文案填入输入框，不自动发送——由用户确认后回车或点发送键才真正发出 */
   function fillComposer(text) {
     const el = $('#input');

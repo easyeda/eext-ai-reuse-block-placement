@@ -1,3 +1,5 @@
+import type { SelectionShortCircuitFlag } from './short-circuit-flags';
+import type { SelectionNetLabel } from './wire-labels';
 /**
  * 对复用模块的读与写操作：读模块原理图摘要（AI 分析用）、符号放置、图页放置、改名称/描述、
  * 从画布选中内容创建新模块。
@@ -19,6 +21,9 @@
  */
 import { matchLocalEprjRow } from './catalog';
 import { edaGlobal, fmtErr, sleep, withTimeout } from './host';
+import { rebuildShortCircuitFlags, verifyShortCircuitFlags } from './short-circuit-flags';
+import { isAutomaticNet, logicalWireSegments, missingWireSegments, pointOnWire, resolveSelectedWireNets } from './wire-geometry';
+import { netLabelKey, readWireNetLabels, saveModuleWithWireNetLabels, wireNetLabelState } from './wire-labels';
 
 const PLACE_TIMEOUT_MS = 30000;
 const MODIFY_TIMEOUT_MS = 20000;
@@ -1309,6 +1314,9 @@ export interface SelectionSnapshot {
 	wires: Array<SelectionWire>;
 	netFlags: Array<SelectionPortLike>;
 	netPorts: Array<SelectionPortLike>;
+	shortCircuitFlags: Array<SelectionShortCircuitFlag>;
+	/** 原图中可见且位于所选导线上的网络标签。 */
+	netLabels: Array<SelectionNetLabel>;
 	/** 选区里被跳过的图元类型（文字/图形/离图连接器等），仅在卡上提示。 */
 	unsupported: Array<string>;
 	/** 选区图元 id（空选区判定用）。 */
@@ -1316,7 +1324,7 @@ export interface SelectionSnapshot {
 }
 
 function emptySnapshot(): SelectionSnapshot {
-	return { parts: [], wires: [], netFlags: [], netPorts: [], unsupported: [], primitiveIds: [] };
+	return { parts: [], wires: [], netFlags: [], netPorts: [], shortCircuitFlags: [], netLabels: [], unsupported: [], primitiveIds: [] };
 }
 
 /**
@@ -1448,6 +1456,9 @@ export async function readSelectionSnapshot(): Promise<SelectionSnapshot> {
 			else if (cType === 'netport') {
 				snap.netPorts.push({ componentName: cName, net, ...at });
 			}
+			else if (cType === 'short_symbol') {
+				snap.shortCircuitFlags.push(at);
+			}
 			else {
 				snap.unsupported.push(cType);
 			}
@@ -1455,8 +1466,7 @@ export async function readSelectionSnapshot(): Promise<SelectionSnapshot> {
 		}
 		if (line !== undefined) {
 			// 走线按**分段**直接入快照，段上带的 net 一并保留。
-			// 曾试过归并回逻辑走线以求「不多出网络标签」，但归并后不带 net 建会被宿主拒绝
-			// （create failed!），把线丢了——**连通性优先，标签不管**，这里回退为逐段带 net。
+			// 记录网络名用于重建后的连通性校验，可见标签单独按原图采集。
 			// 唯一的例外是零长度段（所有点重合）：宿主必拒且它不承载任何连接，跳过并计入"未写入"。
 			if (isDegenerateWireLine(flattenWireLine(line))) {
 				degenerate++;
@@ -1475,7 +1485,31 @@ export async function readSelectionSnapshot(): Promise<SelectionSnapshot> {
 			});
 			continue;
 		}
-		snap.unsupported.push('unknown');
+		if (typeof o.getState_Key !== 'function')
+			snap.unsupported.push('unknown');
+	}
+	if (snap.wires.length) {
+		const wireApi = edaGlobal()?.sch_PrimitiveWire as { getAll?: () => Promise<Array<Record<string, unknown>>> } | undefined;
+		if (typeof wireApi?.getAll !== 'function')
+			throw new Error('读取整页导线接口不可用，无法核对选区网络');
+		const logical = (await withTimeout(wireApi.getAll(), 15000, '核对选区导线网络超时')).map(w => ({
+			line: readPrimitiveStateOf(w, 'getState_Line') as SelectionWire['line'],
+			net: String(readPrimitiveStateOf(w, 'getState_Net') ?? ''),
+			color: null,
+			lineWidth: null,
+			lineType: null,
+		}));
+		snap.wires = resolveSelectedWireNets(snap.wires, logical);
+	}
+	const labelKeys = new Set<string>();
+	for (const label of await readWireNetLabels()) {
+		if (!snap.wires.some(w => w.net === label.net && pointOnWire(w, label.x, label.y)))
+			continue;
+		const key = netLabelKey(label);
+		if (!labelKeys.has(key)) {
+			labelKeys.add(key);
+			snap.netLabels.push(label);
+		}
 	}
 	if (degenerate)
 		snap.unsupported.push(`零长度走线×${degenerate}`);
@@ -1498,7 +1532,7 @@ function isDegenerateWireLine(pts: Array<number>): boolean {
 	if (pts.length < 4)
 		return true;
 	for (let i = 2; i + 1 < pts.length; i += 2) {
-		if (pts[i] !== pts[0] || pts[i + 1] !== pts[1])
+		if (Math.hypot(pts[i] - pts[0], pts[i + 1] - pts[1]) > 1e-5)
 			return false;
 	}
 	return true;
@@ -1523,7 +1557,7 @@ export interface PageComponent {
 	id: string;
 	/** 器件用位号；网络标志/端口用其网络名。 */
 	designator: string;
-	kind: 'part' | 'netflag' | 'netport' | 'other';
+	kind: 'part' | 'netflag' | 'netport' | 'short_symbol' | 'other';
 	/** 库器件型号（如 ESP32-C3-WROOM-02-N4）。仅 part 有。 */
 	device?: string;
 	value?: string;
@@ -1719,7 +1753,7 @@ export async function readSchematicPage(): Promise<SchematicReadResult> {
 		const fp = readPrimitiveStateOf(c, 'getState_Footprint') as { name?: unknown } | undefined;
 		const other = readPrimitiveStateOf(c, 'getState_OtherProperty') as Record<string, unknown> | undefined;
 		const value = other && typeof other.Value === 'string' ? other.Value : undefined;
-		const kind: PageComponent['kind'] = type === 'part' || type === 'netflag' || type === 'netport' ? type : 'other';
+		const kind: PageComponent['kind'] = type === 'part' || type === 'netflag' || type === 'netport' || type === 'short_symbol' ? type : 'other';
 		const netName = String(readPrimitiveStateOf(c, 'getState_Name') ?? '');
 		components.push({
 			id: String(c.primitiveId ?? ''),
@@ -1784,9 +1818,10 @@ export async function readSchematicPage(): Promise<SchematicReadResult> {
 			try {
 				const attrs = (await withTimeout(attrApi.getAll(w.id), PIN_READ_TIMEOUT_MS, '读取走线属性超时')) || [];
 				for (const a of Array.isArray(attrs) ? attrs : []) {
-					if (a?.valueVisible !== true)
+					const label = wireNetLabelState(a);
+					if (!label.visible)
 						continue;
-					const v = String(a.value ?? '');
+					const v = label.value;
 					if (v)
 						labelCount.set(v, (labelCount.get(v) || 0) + 1);
 				}
@@ -1868,6 +1903,7 @@ export interface SelectModuleBySeedResult {
 	seed: string;
 	members: Array<{ designator: string; device: string; value?: string }>;
 	portCount: number;
+	shortCircuitFlagCount: number;
 	wireCount: number;
 	labelCount: number;
 	selectedTotal: number;
@@ -1962,6 +1998,7 @@ export async function selectModuleBySeed(seed: string, opts?: { linkDistance?: n
 
 	// ④ 网络端口 / 标志
 	const ports = all.filter(c => (c.type === 'netflag' || c.type === 'netport') && inRegion(c.x, c.y));
+	const shortCircuitFlags = all.filter(c => c.type === 'short_symbol' && inRegion(c.x, c.y));
 
 	// ⑤ 走线
 	const wireApi = edaGlobal()?.sch_PrimitiveWire as { getAll?: () => Promise<Array<Record<string, unknown>>> } | undefined;
@@ -2000,20 +2037,22 @@ export async function selectModuleBySeed(seed: string, opts?: { linkDistance?: n
 			try {
 				const attrs = (await withTimeout(attrApi.getAll(wid), PIN_READ_TIMEOUT_MS, '读取走线属性超时')) || [];
 				for (const a of Array.isArray(attrs) ? attrs : []) {
-					if (a?.valueVisible === true && String(a.value ?? '') && typeof a.primitiveId === 'string')
-						labelIds.push(a.primitiveId);
+					const label = wireNetLabelState(a);
+					if (label.visible && label.value && label.id)
+						labelIds.push(label.id);
 				}
 			}
 			catch { /* 单条读失败跳过 */ }
 		}
 	}
 
-	const ids = near.map(m => m.id).concat(ports.map(p => p.id)).concat(wireIds).concat(labelIds);
+	const ids = near.map(m => m.id).concat(ports.map(p => p.id)).concat(shortCircuitFlags.map(p => p.id)).concat(wireIds).concat(labelIds);
 	const { selected } = await selectPrimitives(ids, 'replace');
 	return {
 		seed: `${seedCand.des || seedCand.device}（${seedCand.device || seedCand.type}）`,
 		members: near.map(m => ({ designator: m.des, device: m.device, value: m.value })),
 		portCount: ports.length,
+		shortCircuitFlagCount: shortCircuitFlags.length,
 		wireCount: wireIds.length,
 		labelCount: labelIds.length,
 		selectedTotal: selected,
@@ -2085,7 +2124,7 @@ export interface CreateCbbModuleResult {
 	cbbUuid: string;
 	pageUuid: string;
 	pageName: string;
-	rebuilt: { parts: number; wires: number; netFlags: number; netPorts: number };
+	rebuilt: { parts: number; wires: number; netFlags: number; netPorts: number; shortCircuitFlags: number };
 	/** 逐条失败说明（器件缺库、走线创建失败等），不中断整体。 */
 	failures: Array<string>;
 }
@@ -2093,8 +2132,8 @@ export interface CreateCbbModuleResult {
 /**
  * 从选区快照创建复用模块并写入库。
  *
- * 重建顺序固定为 器件 → 网络标志 → 网络端口 → 走线：走线放最后，端点才落在已带网的引脚上
- * （若先建走线再接网络，端点会落在无网或异网的图元上，宿主会拒绝创建）。
+ * 先逐段创建不显式命名的导线，再放器件、标志、端口和原图标签。
+ * 先有导线再赋名，避免每个线段都生成一份不可持久隐藏的网络标签。
  *
  * 无论中途哪一步失败，finally 都会切回原工程与原页——否则用户被留在模块工程里。
  */
@@ -2105,6 +2144,18 @@ export async function createCbbModuleFromSelection(params: CreateCbbModuleParams
 		throw new Error('模块名称不能为空');
 	assertPlaceableLibrary(params.libraryUuid);
 	assertSelectionSize(params.snapshot);
+	if (!Array.isArray(params.snapshot.netLabels))
+		throw new Error('选区快照缺少原图标签信息，请重新发起创建模块');
+	if (!Array.isArray(params.snapshot.shortCircuitFlags))
+		throw new Error('选区快照缺少短接标识信息，请重新发起创建模块');
+	const named = new Set([
+		...params.snapshot.netFlags.map(p => p.net),
+		...params.snapshot.netPorts.map(p => p.net),
+		...params.snapshot.netLabels.map(p => p.net),
+	]);
+	const unresolved = [...new Set(params.snapshot.wires.map(w => w.net).filter(net => net && !isAutomaticNet(net) && !named.has(net)))];
+	if (unresolved.length)
+		throw new Error(`请把网络 ${unresolved.join('、')} 的标签或网络标志一并选中，再重新创建模块，避免丢失网络名称`);
 
 	const cbbApi = edaGlobal()?.lib_Cbb as
 		| {
@@ -2141,7 +2192,7 @@ export async function createCbbModuleFromSelection(params: CreateCbbModuleParams
 		throw new Error('新建模块未成功（宿主静默返回空 uuid）。可能是该库无写权限，或客户端版本低于 V4.1.71。');
 
 	const failures: Array<string> = [];
-	const rebuilt = { parts: 0, wires: 0, netFlags: 0, netPorts: 0 };
+	const rebuilt = { parts: 0, wires: 0, netFlags: 0, netPorts: 0, shortCircuitFlags: 0 };
 	let pageUuid = '';
 	let pageName = '';
 	try {
@@ -2162,33 +2213,19 @@ export async function createCbbModuleFromSelection(params: CreateCbbModuleParams
 		pageUuid = page.pageUuid;
 		pageName = page.pageName;
 
-		// 5) 重建：顺序不可调（见函数注释）。
+		// 5) 先建立完整几何，再通过原有标志和标签还原网络名。
+		await rebuildWires(params.snapshot.wires, failures, rebuilt);
 		await rebuildParts(params.snapshot.parts, failures, rebuilt);
 		await rebuildFlags(params.snapshot.netFlags, failures, rebuilt);
 		await rebuildPorts(params.snapshot.netPorts, failures, rebuilt);
-		await rebuildWires(params.snapshot.wires, failures, rebuilt);
+		await rebuildNetLabels(params.snapshot.netLabels);
+		rebuilt.shortCircuitFlags = await rebuildShortCircuitFlags(params.snapshot.shortCircuitFlags);
 
 		// 6) 落盘。回读前先等一拍：实测改动后立刻读会拿到旧值。
 		await sleep(800);
-		const doc = edaGlobal()?.sch_Document as { save?: () => Promise<boolean> } | undefined;
-		if (typeof doc?.save !== 'function')
-			throw new Error('sch_Document.save 不可用');
-		const saved = await withTimeout(doc.save(), SAVE_TIMEOUT_MS, '保存模块超时（20s）');
-		if (saved !== true)
-			throw new Error('保存模块失败（接口返回 false）');
-		// ★ 保存后必须再清扫：宿主在**保存时**才把相邻分段合并成逻辑走线，并给合并后的线
-		//   重新聚合网络名标签（实测 0 → 8 复现）。保存前的清扫因此必然被推翻一部分。
-		// 保存→清扫→再保存，迭代到无可见标签（上限 3 轮；实测 2 轮内收敛）。
-		for (let round = 0; round < 3; round++) {
-			const remaining = await hideAllWireNetLabels();
-			if (!remaining)
-				break;
-			await sleep(800);
-			const resaved = await withTimeout(doc.save(), SAVE_TIMEOUT_MS, '保存模块超时（20s）');
-			if (resaved !== true)
-				break;
-			await sleep(1200);
-		}
+		await saveModuleWithWireNetLabels(params.snapshot.netLabels);
+		await verifyRebuiltWires(params.snapshot.wires);
+		await verifyShortCircuitFlags(params.snapshot.shortCircuitFlags);
 	}
 	catch (e) {
 		// 模块已建成但内容写入失败：回滚删除，避免库里留空壳。删除失败只记录不覆盖原错误。
@@ -2407,52 +2444,6 @@ async function rebuildPorts(ports: Array<SelectionPortLike>, failures: Array<str
 	rebuilt.netPorts = Math.max(0, (await countPageContent()).comps - before);
 }
 
-/**
- * 收尾清扫：隐藏模块页内**所有**走线的可见网络名标签，返回隐藏数量。
- *
- * 为什么不能"建一条隐藏一条"（2026-10-16 SC8721 模块实测教训）：
- * - 读选区拿到的是**分段**，每段各自 create 并带 net → **每段各自生成一条 Name 标签**；
- * - 宿主随后把相邻分段**合并**成逻辑走线，标签也聚合到合并后的线上（实测一条线上
- *   聚了 6 个 VBUS、8 个 O_-）；逐段创建时隐藏的时机**早于合并**，等于白做——
- *   82 条可见标签只压住了 GND/PVCC 等未参与合并的少数几条。
- * 所以在全部走线建完、合并落定之后统一扫一遍：遍历页内所有走线，
- * 把 valueVisible=true 的属性置 false。网络标志/端口是独立器件，不在清扫范围。
- */
-async function hideAllWireNetLabels(): Promise<number> {
-	const attrApi = edaGlobal()?.sch_PrimitiveAttribute as
-		| {
-			getAll?: (parentPrimitiveId?: string) => Promise<Array<Record<string, unknown>>>;
-			modify?: (target: unknown, property: Record<string, unknown>) => Promise<unknown>;
-		}
-		| undefined;
-	const wireApi = edaGlobal()?.sch_PrimitiveWire as
-		| { getAll?: () => Promise<Array<Record<string, unknown>>> }
-		| undefined;
-	if (typeof attrApi?.getAll !== 'function' || typeof attrApi.modify !== 'function' || typeof wireApi?.getAll !== 'function')
-		return 0;
-	let hidden = 0;
-	try {
-		const wires = (await withTimeout(wireApi.getAll(), DEVICE_LOOKUP_TIMEOUT_MS, '读取模块走线超时')) || [];
-		for (const w of Array.isArray(wires) ? wires : []) {
-			const wid = String(w?.primitiveId ?? '');
-			if (!wid)
-				continue;
-			const attrs = (await withTimeout(attrApi.getAll(wid), DEVICE_LOOKUP_TIMEOUT_MS, '读取走线属性超时')) || [];
-			for (const a of Array.isArray(attrs) ? attrs : []) {
-				if (!a || a.valueVisible !== true)
-					continue;
-				try {
-					await withTimeout(attrApi.modify(a, { valueVisible: false }), DEVICE_LOOKUP_TIMEOUT_MS, '隐藏网络标签超时');
-					hidden++;
-				}
-				catch { /* 单条失败不阻断清扫 */ }
-			}
-		}
-	}
-	catch { /* 清扫失败不阻断建模块——标签只是显示问题 */ }
-	return hidden;
-}
-
 async function rebuildWires(wires: Array<SelectionWire>, failures: Array<string>, rebuilt: { wires: number }): Promise<void> {
 	if (!wires.length)
 		return;
@@ -2465,10 +2456,11 @@ async function rebuildWires(wires: Array<SelectionWire>, failures: Array<string>
 	}
 	const before = (await countPageContent()).wires;
 	for (const w of wires) {
-		// 逐段带 net 建（最初始的写法）。**连通性优先**：不带 net 建会被宿主拒绝（create failed!）
-		// 而丢线。多出的网络标签由收尾的 hideAllWireNetLabels 统一清扫，不在这里逐条隐藏。
+		// 导线先于器件创建且不传 net，名称随后由标志/端口和原图标签赋予。
 		try {
-			await withTimeout(wire.create(w.line, w.net || undefined, w.color, w.lineWidth, w.lineType), REBUILD_ONE_TIMEOUT_MS, '重建走线超时');
+			const round = (n: number): number => Math.round(n * 1e6) / 1e6;
+			const line = Array.isArray(w.line[0]) ? (w.line as Array<Array<number>>).map(path => path.map(round)) : (w.line as Array<number>).map(round);
+			await withTimeout(wire.create(line, undefined, w.color, w.lineWidth, w.lineType), REBUILD_ONE_TIMEOUT_MS, '重建走线超时');
 		}
 		catch (e) {
 			failures.push(`走线（${w.net || '无网络'}）：${fmtErr(e)}`);
@@ -2476,7 +2468,55 @@ async function rebuildWires(wires: Array<SelectionWire>, failures: Array<string>
 	}
 	await sleep(800);
 	rebuilt.wires = Math.max(0, (await countPageContent()).wires - before);
-	await hideAllWireNetLabels();
+	await verifyRebuiltWires(wires, false);
+}
+
+async function rebuildNetLabels(labels: Array<SelectionNetLabel>): Promise<void> {
+	if (!labels.length)
+		return;
+	const api = edaGlobal()?.sch_PrimitiveAttribute as { createNetLabel?: (x: number, y: number, net: string) => Promise<unknown> } | undefined;
+	if (typeof api?.createNetLabel !== 'function')
+		throw new Error('原图网络标签重建不可用：createNetLabel 缺失');
+	for (const label of labels)
+		await withTimeout(api.createNetLabel(label.x, label.y, label.net), REBUILD_ONE_TIMEOUT_MS, `重建网络标签 ${label.net} 超时`);
+	await sleep(800);
+}
+
+async function verifyRebuiltWires(expected: Array<SelectionWire>, checkNames = true): Promise<void> {
+	if (!expected.length)
+		return;
+	const api = edaGlobal()?.sch_PrimitiveWire as { getAll?: () => Promise<Array<Record<string, unknown>>> } | undefined;
+	if (typeof api?.getAll !== 'function')
+		throw new Error('无法验证重建导线：sch_PrimitiveWire.getAll 不可用');
+	const rows = await withTimeout(api.getAll(), DEVICE_LOOKUP_TIMEOUT_MS, '验证重建导线超时');
+	const comp = edaGlobal()?.sch_PrimitiveComponent as { getAll?: () => Promise<Array<Record<string, unknown>>> } | undefined;
+	const ports = checkNames && typeof comp?.getAll === 'function'
+		? (await comp.getAll()).filter(c => ['netflag', 'netport'].includes(String(readPrimitiveStateOf(c, 'getState_ComponentType')))).map(c => ({
+				net: String(readPrimitiveStateOf(c, 'getState_Name') ?? ''),
+				x: Number(readPrimitiveStateOf(c, 'getState_X')),
+				y: Number(readPrimitiveStateOf(c, 'getState_Y')),
+			}))
+		: [];
+	const actual = rows.map(w => ({
+		line: readPrimitiveStateOf(w, 'getState_Line') as SelectionWire['line'],
+		net: String(readPrimitiveStateOf(w, 'getState_Net') ?? ''),
+		color: null,
+		lineWidth: null,
+		lineType: null,
+	}));
+	for (const wire of actual) {
+		if (!wire.net)
+			wire.net = ports.find(p => logicalWireSegments([wire]).some(segment => pointOnWire(segment, p.x, p.y)))?.net || '';
+	}
+	const actualSegments = logicalWireSegments(actual);
+	const missing = missingWireSegments(expected.map(w => ({ ...w, net: '' })), actualSegments);
+	if (missing.length)
+		throw new Error(`导线重建不完整：${missing.length} 个线段未落到画布（${missing.map(s => `${s.x1},${s.y1} → ${s.x2},${s.y2}`).join('；')}）`);
+	if (checkNames) {
+		const wrongNet = missingWireSegments(expected, actualSegments);
+		if (wrongNet.length)
+			throw new Error(`导线网络不一致：${wrongNet.length} 个线段（${wrongNet.map(s => `${s.net}：${s.x1},${s.y1} → ${s.x2},${s.y2}`).join('；')}）`);
+	}
 }
 
 /** 摘要里的单行器件：位号 d / 画布名 n / 库器件名 dev / 封装名 fp。 */
